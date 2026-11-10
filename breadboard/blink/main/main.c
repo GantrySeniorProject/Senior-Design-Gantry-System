@@ -89,6 +89,10 @@
 #define THERM_R0          10000.0f
 #define THERM_BETA        3950.0f  // check your thermistor
 #define PI_F              3.14159265f
+// Parts whose pins float when nothing is wired: keep 0 until the part is connected,
+// otherwise the floating pin produces fake readings (fake obstacles / temperatures).
+#define USE_ULTRASONIC    0        // set to 1 once TRIG/ECHO (with divider) are wired
+#define USE_THERMISTOR    0        // set to 1 once the thermistor divider is wired
 #define RAD2DEG           57.2957795f
 
 // ----------------------------- State --------------------------------------
@@ -110,8 +114,6 @@ static volatile float    jogSetpoint = 0;
 
 static volatile float sensRoll = NAN, sensPitch = NAN, sensTempC = NAN, sensDistCm = NAN;
 static volatile uint32_t vibCount = 0;
-static volatile int64_t  echoRise = 0;
-static volatile int32_t  echoWidthUs = -1;
 
 static i2c_master_bus_handle_t i2cBus;
 static i2c_master_dev_handle_t lcdDev, mpuDev;
@@ -204,12 +206,14 @@ static void raise_fault_locked(fault_t_ f) {     // call only while holding moti
 static void raise_fault(fault_t_ f) {
   portENTER_CRITICAL(&motionMux);
   raise_fault_locked(f);
+  if (mode == M_FAULT && coilsOn) coils_off();
   portEXIT_CRITICAL(&motionMux);
 }
 
 // ----------------------------- 1 kHz motion controller --------------------
 static float jogVel = 0, jogAcc = 0, homeVel = 0, homeAcc = 0;
 static int32_t homeSteps = 0;
+static volatile uint32_t motionTicks = 0;   // proves the 1 kHz controller is running
 
 static void motion_tick(void *arg) {
   (void)arg;
@@ -218,6 +222,7 @@ static void motion_tick(void *arg) {
   bool limMin = gpio_get_level(PIN_LIMIT_MIN) == 0;
   bool limMax = gpio_get_level(PIN_LIMIT_MAX) == 0;
   uint32_t now = millis32();
+  motionTicks++;
 
   portENTER_CRITICAL(&motionMux);
   if (estop) raise_fault_locked(F_ESTOP);
@@ -408,11 +413,16 @@ static float kalman_update(kalman_t *k, float meas, float rate, float dt, float 
 // ----------------------------- Interrupts ---------------------------------
 static void IRAM_ATTR vib_isr(void *arg) { (void)arg; vibCount++; }
 
-static void IRAM_ATTR echo_isr(void *arg) {
-  (void)arg;
-  int64_t now = esp_timer_get_time();
-  if (gpio_get_level(PIN_US_ECHO)) echoRise = now;
-  else if (echoRise) { echoWidthUs = (int32_t)(now - echoRise); echoRise = 0; }
+// Polled echo timing (no interrupt, so an unconnected GPIO35 can't flood the CPU)
+static float measure_ultrasonic_cm(void) {
+  gpio_set_level(PIN_US_TRIG, 1); esp_rom_delay_us(10); gpio_set_level(PIN_US_TRIG, 0);
+  int64_t t0 = esp_timer_get_time();
+  while (gpio_get_level(PIN_US_ECHO) == 0)
+    if (esp_timer_get_time() - t0 > 3000) return NAN;        // echo never started
+  int64_t rise = esp_timer_get_time();
+  while (gpio_get_level(PIN_US_ECHO) == 1)
+    if (esp_timer_get_time() - rise > 25000) return NAN;     // nothing within ~4 m
+  return (float)(esp_timer_get_time() - rise) / 58.0f;
 }
 
 // ----------------------------- Sensor task (core 0) -----------------------
@@ -450,15 +460,12 @@ static void sensor_task(void *arg) {
 
     bool moving = (mode == M_MOVE || mode == M_JOG || mode == M_HOMING);
 
-    if (nowMs - tSonic >= 100) {              // read the last ping, then fire a new one
+    if (USE_ULTRASONIC && nowMs - tSonic >= 100) {
       tSonic = nowMs;
-      int32_t w = echoWidthUs;
-      float d = (w > 0 && w < 25000) ? (float)w / 58.0f : NAN;
+      float d = measure_ultrasonic_cm();
       sensDistCm = d;
       if (!isnan(d) && d < OBSTACLE_CM) closeCount++; else closeCount = 0;
       if (moving && closeCount >= 3) raise_fault(F_OBSTACLE);
-      echoWidthUs = -1; echoRise = 0;
-      gpio_set_level(PIN_US_TRIG, 1); esp_rom_delay_us(10); gpio_set_level(PIN_US_TRIG, 0);
     }
 
     if (nowMs - tVib >= 1000) {
@@ -616,10 +623,13 @@ static void ui_task(void *arg) {
 
   fault_t_ lastFault = F_NONE;
   int beeps = 0, lastSw = 1;
-  uint32_t tBeep = 0, tLcd = 0, tTel = 0, tTemp = 0, lastSwMs = 0;
+  uint32_t tBeep = 0, tLcd = 0, tTel = 0, tTemp = 0, lastSwMs = 0, lastTicks = 0;
 
   for (;;) {
     uint32_t now = millis32();
+
+    // Backup e-stop check from the other core, in case the motion timer is starved
+    if (gpio_get_level(PIN_ESTOP) == 0) raise_fault(F_ESTOP);
 
     // Joystick: X jogs the stepper, Y nudges the servo, press toggles jog / resets
     float nx = (adc_raw(ADC_JOY_X) - cx) / 2048.0f, ny = (adc_raw(ADC_JOY_Y) - cy) / 2048.0f;
@@ -643,7 +653,7 @@ static void ui_task(void *arg) {
     else if (wqIdx < wqLen && mode == M_IDLE) { int i = wqIdx; wqIdx = i + 1; start_move(wq[i]); }
 
     // Thermistor (all ADC reads stay in this task)
-    if (now - tTemp >= 500) {
+    if (USE_THERMISTOR && now - tTemp >= 500) {
       tTemp = now;
       float t = read_thermistor_c();
       sensTempC = t;
@@ -688,6 +698,12 @@ static void ui_task(void *arg) {
       printf("%-5s pos=%ld enc=%ld err=%ld homed=%d | T=%.1fC dist=%.1fcm roll=%.1f pitch=%.1f servo=%.0f\n",
              MODE_NAMES[mode], (long)posCmd, (long)encVirtual, (long)(posCmd - encVirtual), (int)homed,
              sensTempC, sensDistCm, sensRoll, sensPitch, servoAngle);
+      // Raw input levels: 1 = released (pulled up), 0 = pressed / connected to GND
+      printf("      inputs: ESTOP(4)=%d MIN(32)=%d MAX(33)=%d JOY_SW(18)=%d VIB(19)=%d | joyX=%d joyY=%d | controller=%lu Hz\n",
+             gpio_get_level(PIN_ESTOP), gpio_get_level(PIN_LIMIT_MIN), gpio_get_level(PIN_LIMIT_MAX),
+             gpio_get_level(PIN_JOY_SW), gpio_get_level(PIN_VIBRATION),
+             adc_raw(ADC_JOY_X), adc_raw(ADC_JOY_Y), (unsigned long)(motionTicks - lastTicks));
+      lastTicks = motionTicks;
     }
 
     vTaskDelay(pdMS_TO_TICKS(20));            // 50 Hz
@@ -718,13 +734,12 @@ void app_main(void) {
     .pull_up_en = GPIO_PULLUP_ENABLE, .intr_type = GPIO_INTR_NEGEDGE,
   };
   ESP_ERROR_CHECK(gpio_config(&vib));
-  gpio_config_t echo = {                     // GPIO35 is input-only, no pull-ups
-    .pin_bit_mask = 1ULL << PIN_US_ECHO, .mode = GPIO_MODE_INPUT, .intr_type = GPIO_INTR_ANYEDGE,
+  gpio_config_t echo = {                     // GPIO35 is input-only, no pull-ups, polled
+    .pin_bit_mask = 1ULL << PIN_US_ECHO, .mode = GPIO_MODE_INPUT,
   };
   ESP_ERROR_CHECK(gpio_config(&echo));
   ESP_ERROR_CHECK(gpio_install_isr_service(0));
   ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_VIBRATION, vib_isr, NULL));
-  ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_US_ECHO, echo_isr, NULL));
 
   // I2C bus, LCD (0x27 or 0x3F) and MPU6050 (0x68)
   i2c_master_bus_config_t bus = {
