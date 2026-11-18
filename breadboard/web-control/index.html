@@ -1,0 +1,1006 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gantry Control</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --line: #d5d9e0;
+    --box: #eef0f4; --box-hover: #dfe4ec; --accent: #2563eb; --accent-text: #ffffff;
+    --ok: #15803d; --warn: #b45309; --bad: #c81e1e; --bad-text: #ffffff;
+    --carriage: #2563eb; --cell: #f7f8fa; --cell-line: #e3e7ee; --end: #e7ebf2;
+    --blk-a: #f3c9c4; --blk-b: #e9aba4; --path: rgba(37, 99, 235, .16); --path-line: #2563eb; --goal: #15803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11141a; --panel: #1a1e26; --text: #e6e9ef; --muted: #98a1b2; --line: #2d3340;
+      --box: #232834; --box-hover: #2d3442; --accent: #4f8bff; --accent-text: #0b0f17;
+      --ok: #3fbf6f; --warn: #e3a33b; --bad: #ef4444; --bad-text: #ffffff;
+      --carriage: #4f8bff; --cell: #1f242e; --cell-line: #2a303c; --end: #2a303c;
+    --blk-a: #4a2626; --blk-b: #5d2e2e; --path: rgba(79, 139, 255, .22); --path-line: #6ea0ff; --goal: #3fbf6f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #11141a; --panel: #1a1e26; --text: #e6e9ef; --muted: #98a1b2; --line: #2d3340;
+    --box: #232834; --box-hover: #2d3442; --accent: #4f8bff; --accent-text: #0b0f17;
+    --ok: #3fbf6f; --warn: #e3a33b; --bad: #ef4444; --bad-text: #ffffff;
+    --carriage: #4f8bff; --cell: #1f242e; --cell-line: #2a303c; --end: #2a303c;
+    --blk-a: #4a2626; --blk-b: #5d2e2e; --path: rgba(79, 139, 255, .22); --path-line: #6ea0ff; --goal: #3fbf6f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 40px; }
+  /* X/Y panel on the left, Z bar on its own on the right */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 168px; gap: 16px; align-items: stretch; margin-top: 16px; }
+  .layout > .panel { margin-top: 0; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; justify-content: space-between; }
+  h1 { font-size: 20px; margin: 0; }
+  .conn { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--ok); }
+  .dot.stale { background: var(--warn); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px; margin-top: 16px;
+  }
+  .hint { font-size: 16px; margin: 0 0 16px; min-height: 1.45em; }
+  .hint.fault { color: var(--bad); font-weight: 600; }
+
+  /* ---- Workspace: X/Y grid ---- */
+  .workspace { display: flex; justify-content: center; }
+  .xy { flex: 1 1 auto; max-width: 600px; min-width: 0; }
+  .xy-frame { display: grid; grid-template-columns: auto 1fr; grid-template-rows: 1fr auto; gap: 4px; }
+  .yticks, .xticks { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .yticks { display: flex; flex-direction: column; justify-content: space-between; text-align: right; padding: 2px 0; }
+  .xticks { grid-column: 2; display: flex; justify-content: space-between; padding: 0 2px; }
+  .plate {
+    position: relative; aspect-ratio: 1 / 1; border: 4px solid var(--end); border-radius: 8px;
+    transition: border-color .1s;
+  }
+  /* limit switches as the four edges of the plate */
+  .plate.xmin { border-left-color: var(--warn); }
+  .plate.xmax { border-right-color: var(--warn); }
+  .plate.ymin { border-bottom-color: var(--warn); }
+  .plate.ymax { border-top-color: var(--warn); }
+  .cells {
+    position: absolute; inset: 0; display: grid; --n: 16;
+    grid-template-columns: repeat(var(--n), minmax(0, 1fr)); grid-template-rows: repeat(var(--n), minmax(0, 1fr));
+    background: var(--cell); border-radius: 4px; overflow: hidden; touch-action: none;
+  }
+  .cell {
+    border: 0; padding: 0; margin: 0; background: transparent; cursor: pointer;
+    box-shadow: inset -1px -1px 0 var(--cell-line);       /* right + bottom edge of each cell */
+  }
+  .cell:hover { background: var(--box-hover); }
+  .cell.onpath { background: var(--path); }
+  .cell.goal { background: var(--path); box-shadow: inset 0 0 0 2px var(--goal); }
+  /* blocked = an item sits there: hatched */
+  .cell.blocked { background: repeating-linear-gradient(45deg, var(--blk-a) 0 4px, var(--blk-b) 4px 8px); }
+  .plate.blockmode .cell { cursor: cell; }
+  .plate.blockmode { border-style: dashed; }
+  svg.route { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  svg.route polyline { fill: none; stroke: var(--path-line); stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+  svg.route.preview polyline { stroke-dasharray: 7 6; }
+
+  /* ---- Grid toolbar + plan bar ---- */
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 12px; }
+  .toolbar .lbl { font-size: 13px; color: var(--muted); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button {
+    font: inherit; font-size: 13px; font-weight: 600; padding: 6px 11px; border: 0; cursor: pointer;
+    background: var(--box); color: var(--muted);
+  }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+  .tbtn {
+    font: inherit; font-size: 13px; font-weight: 600; padding: 6px 11px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--box); color: var(--text);
+  }
+  .tbtn:disabled { opacity: .45; cursor: default; }
+  .cellsize { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .planbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px;
+    min-height: 40px; font-size: 14px;
+  }
+  .planbar .msg { flex: 1 1 220px; }
+  .planbar .msg.err { color: var(--bad); font-weight: 600; }
+  button.ctl.go { background: var(--ok); color: #fff; border-color: var(--ok); min-width: 96px; padding: 9px 18px; }
+  button.ctl.go:hover:enabled { background: var(--ok); filter: brightness(1.08); }
+  .marker {
+    position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%;
+    background: var(--carriage); border: 3px solid var(--panel); box-shadow: 0 0 0 2px var(--carriage);
+    pointer-events: none; transition: left .06s linear, top .06s linear;
+  }
+  .marker[hidden] { display: none; }
+  .axis-label { color: var(--muted); font-size: 12px; margin-top: 4px; text-align: center; }
+
+  /* ---- Z bar (separate panel) ---- */
+  .zbar { display: flex; flex-direction: column; gap: 6px; padding: 16px 14px 16px 22px; }
+  .zbar h2 { font-size: 16px; margin: 0; }
+  .zbar .sub { font-size: 12px; color: var(--muted); margin: -4px 0 4px; }
+  .zbar button.ctl { width: 100%; min-width: 0; margin-top: 6px; }
+  .zoff { font-size: 12px; margin: 0 0 4px; padding: 6px 8px; border-radius: 6px; background: var(--box); color: var(--warn); }
+  .zbar.off .zend, .zbar.off .ztrack, .zbar.off dl.zread { opacity: .35; }
+  dl.zread { margin: 6px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; font-size: 13px; }
+  dl.zread dt { color: var(--muted); }
+  dl.zread dd { margin: 0; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .zend {
+    width: 100%; text-align: center; font-size: 11px; font-weight: 700; color: var(--muted);
+    background: var(--end); border-radius: 6px; padding: 2px 0; border: 2px solid transparent;
+  }
+  .zend.pressed { border-color: var(--warn); color: var(--warn); }
+  .ztrack { position: relative; flex: 1; width: 100%; min-height: 320px; }
+  .zlevels { position: absolute; inset: 0; display: grid; grid-template-rows: repeat(9, minmax(0, 1fr)); gap: 3px; }
+  .zbtn {
+    border: 1px solid var(--line); border-radius: 6px; background: var(--box); color: var(--muted);
+    font: inherit; font-size: 11px; cursor: pointer; padding: 0; font-variant-numeric: tabular-nums;
+  }
+  .zbtn:hover:enabled { background: var(--box-hover); }
+  .zbtn:disabled { cursor: default; }
+  .zbtn.here { border-color: var(--carriage); color: var(--text); font-weight: 700; }
+  /* notch on the left edge of the track: where Z really is */
+  .zmarker {
+    position: absolute; left: -9px; width: 7px; height: 14px; margin-top: -7px; border-radius: 3px;
+    background: var(--carriage); pointer-events: none; transition: top .06s linear;
+  }
+  .zmarker[hidden] { display: none; }
+
+  /* ---- Readout ---- */
+  table.axes { border-collapse: collapse; margin-top: 16px; width: 100%; font-variant-numeric: tabular-nums; }
+  table.axes th, table.axes td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); }
+  table.axes th { color: var(--muted); font-weight: 600; font-size: 13px; }
+  .sw { color: var(--muted); }
+  .sw.on { color: var(--warn); font-weight: 700; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 10px; color: var(--muted); }
+  .meta b { color: var(--text); }
+
+  /* ---- Buttons ---- */
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  button.ctl {
+    font: inherit; font-weight: 600; padding: 12px 18px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--box); color: var(--text); min-width: 86px;
+  }
+  button.ctl:hover:enabled { background: var(--box-hover); }
+  button.ctl:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.primary:hover:enabled { background: var(--accent); filter: brightness(1.08); }
+  button.estop {
+    background: var(--bad); color: var(--bad-text); border-color: var(--bad);
+    min-width: 130px; letter-spacing: .04em;
+  }
+  button.estop:hover:enabled { background: var(--bad); filter: brightness(1.1); }
+  .small { font-size: 13px; color: var(--muted); }
+
+  /* ---- E-stop sound ---- */
+  .alarm h2 { font-size: 16px; margin: 0; }
+  .alarm-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+  .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+  .chk input { width: 16px; height: 16px; accent-color: var(--accent); }
+  .alarm-src { margin: 12px 0 10px; }
+  .srcpane { margin-bottom: 10px; }
+  .srcpane[hidden] { display: none; }
+  .drop {
+    display: flex; align-items: center; gap: 10px; padding: 14px; border: 2px dashed var(--line);
+    border-radius: 10px; cursor: pointer; color: var(--muted); font-size: 14px; background: var(--cell);
+  }
+  .drop.over { border-color: var(--accent); color: var(--text); }
+  .drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .drop u { color: var(--accent); }
+  .filename { margin-top: 6px; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .ytrow { display: flex; gap: 8px; }
+  .ytrow input {
+    flex: 1; min-width: 0; font: inherit; font-size: 14px; padding: 7px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--cell); color: var(--text);
+  }
+  .ytbox { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }
+  .ytbox iframe, #ytPlayer { width: 240px; height: 135px; border: 0; border-radius: 8px; background: #000; }
+  .ytbox[hidden] { display: none; }
+  .alarm-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 14px; }
+  .alarm-ctl input[type=range] { width: 140px; accent-color: var(--accent); }
+  .alarm-msg { font-size: 13px; color: var(--muted); }
+  .alarm-msg.err { color: var(--bad); font-weight: 600; }
+  .alarm-msg.ok { color: var(--ok); }
+  .alarm.ringing { border-color: var(--bad); box-shadow: 0 0 0 2px var(--bad); }
+
+  details { margin-top: 16px; }
+  summary { cursor: pointer; color: var(--muted); }
+  summary .sumnote { font-size: 13px; margin-left: 6px; }
+  pre#astarLog {
+    max-height: 360px; overflow: auto; background: var(--box); border-radius: 8px; tab-size: 4;
+    padding: 10px; font-size: 12px; line-height: 1.5; margin: 10px 0 0; white-space: pre;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  pre#log {
+    max-height: 220px; overflow: auto; background: var(--box); border-radius: 8px;
+    padding: 10px; font-size: 12px; margin: 10px 0 0; white-space: pre-wrap; word-break: break-all;
+  }
+  .notice { color: var(--bad); }
+
+  @media (max-width: 640px) {
+    .panel { padding: 14px; }
+    .layout { grid-template-columns: 1fr; }          /* Z bar goes under the X/Y panel */
+    .ztrack { min-height: 280px; }
+    .yticks, .xticks { font-size: 9px; }
+    .seg button, .tbtn { padding: 6px 8px; }
+    button.ctl { flex: 1 1 40%; min-width: 0; padding: 12px 8px; }
+    table.axes th, table.axes td { padding-right: 6px; font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Gantry Control</h1>
+    <div class="conn">
+      <span class="dot" id="dot"></span>
+      <span id="connText">Not connected</span>
+      <button class="ctl primary" id="connectBtn">Connect</button>
+    </div>
+  </header>
+
+  <p class="notice" id="noSerial" hidden>
+    This page needs the Web Serial API: open it in Chrome or Edge on a desktop.
+  </p>
+
+  <div class="layout">
+  <section class="panel">
+    <p class="hint" id="hint">Connect the board to start.</p>
+
+    <div class="toolbar">
+      <span class="lbl">Grid</span>
+      <span class="seg" id="sizeSeg"></span>
+      <span class="lbl">Click to</span>
+      <span class="seg">
+        <button id="modeMove" aria-pressed="true">Plan path</button>
+        <button id="modeBlock" aria-pressed="false">Block cells</button>
+      </span>
+      <button class="tbtn" id="clearBlocks">Clear blocks</button>
+      <span class="cellsize" id="cellSize"></span>
+    </div>
+
+    <div class="workspace">
+      <div class="xy">
+        <div class="xy-frame">
+          <div class="yticks"><span>4096</span><span>3072</span><span>2048</span><span>1024</span><span>0</span></div>
+          <div class="plate" id="plate">
+            <div class="cells" id="cells"></div>
+            <svg class="route" id="route" viewBox="0 0 4096 4096" preserveAspectRatio="none" aria-hidden="true">
+              <polyline id="routeLine" points="" vector-effect="non-scaling-stroke"></polyline>
+            </svg>
+            <div class="marker" id="marker" hidden></div>
+          </div>
+          <div class="xticks"><span>0</span><span>1024</span><span>2048</span><span>3072</span><span>4096</span></div>
+        </div>
+        <div class="axis-label">X →&nbsp;&nbsp;&nbsp; Y ↑ &nbsp;·&nbsp; <span id="hover">hover a cell</span></div>
+      </div>
+    </div>
+
+    <div class="planbar">
+      <span class="msg" id="planMsg"></span>
+      <button class="ctl go" id="goBtn" hidden>GO</button>
+      <button class="ctl" id="cancelBtn" hidden>Cancel</button>
+    </div>
+
+    <table class="axes">
+      <thead><tr><th>Axis</th><th>Position</th><th>Steps</th><th>Rail</th><th>Homed</th><th>MIN</th><th>MAX</th></tr></thead>
+      <tbody id="axisRows"></tbody>
+    </table>
+    <div class="meta">
+      <span>Mode <b id="rMode">–</b></span>
+      <span>Fault <b id="rFault">–</b></span>
+    </div>
+
+    <div class="controls">
+      <button class="ctl estop" data-btn="estop" title="Shortcut: Esc">E-STOP</button>
+      <button class="ctl" data-btn="stop">STOP</button>
+      <button class="ctl" data-btn="home">HOME ALL</button>
+      <button class="ctl" data-btn="home:X">HOME X</button>
+      <button class="ctl" data-btn="home:Y">HOME Y</button>
+      <button class="ctl" data-btn="min" id="minBtn">MIN</button>
+      <button class="ctl" data-btn="max" id="maxBtn">MAX</button>
+      <button class="ctl" data-btn="reset">RESET</button>
+      <button class="ctl" data-btn="resetkeep" hidden>RESET (keep home)</button>
+    </div>
+    <p class="small">
+      HOME ALL homes X, then Y (with the Z axis enabled, Z goes first so it ends raised). While an axis homes, MIN and MAX
+      mark its ends, like its keypad keys: X <b>0</b> / <b>1</b>, Y <b>#</b> / <b>3</b>, Z <b>D</b> / <b>A</b>.
+      Once homed (it ends at 0,0), click a cell: A* (Manhattan) finds the shortest way around blocked cells with
+      the fewest turns, shown dashed; GO drives it, stopping only at corners. <b>Block cells</b> marks where items
+      are (click or drag; blocked cells carry over between grid sizes). The Z bar raises or lowers the attachment.
+      Esc is E-STOP. After an E-stop, RESET (keep home) skips re-homing if nothing moved.
+    </p>
+  </section>
+
+  <aside class="panel zbar" id="zbar" aria-label="Z axis">
+    <h2>Z axis</h2>
+    <p class="sub">Attachment up / down</p>
+    <p class="zoff" id="zOffNote" hidden>Disabled in the firmware (<code>USE_Z_AXIS 0</code>). Only X and Y are homed and moved.</p>
+    <div class="zend" id="zMax">UP · MAX (A)</div>
+    <div class="ztrack">
+      <div class="zlevels" id="zlevels"></div>
+      <div class="zmarker" id="zmarker" hidden></div>
+    </div>
+    <div class="zend" id="zMin">DOWN · MIN (D)</div>
+    <dl class="zread">
+      <dt>Position</dt><dd id="zPos">–</dd>
+      <dt>Steps</dt><dd id="zSteps">–</dd>
+      <dt>Rail</dt><dd id="zSpan">–</dd>
+      <dt>Homed</dt><dd id="zHomed">–</dd>
+    </dl>
+    <button class="ctl" data-btn="home:Z">HOME Z</button>
+  </aside>
+  </div>
+
+  <section class="panel alarm" id="alarmPanel" aria-label="E-stop sound">
+    <div class="alarm-head">
+      <h2>E-stop sound</h2>
+      <label class="chk"><input type="checkbox" id="alarmOn" checked>
+        <span>Play on this computer when the E-stop trips (keypad <b>*</b>, E-STOP button or Esc)</span></label>
+    </div>
+    <div class="alarm-src seg" id="srcSeg" role="radiogroup" aria-label="Sound source">
+      <button data-src="builtin" role="radio">Built-in alarm</button>
+      <button data-src="file" role="radio">Sound file</button>
+      <button data-src="youtube" role="radio">YouTube link</button>
+    </div>
+
+    <div class="srcpane" id="paneFile" hidden>
+      <label class="drop" id="dropZone">
+        <input type="file" id="fileIn" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus,.webm">
+        <span>Drop an audio file here, or <u>choose one</u> (mp3, wav, ogg, m4a…). It's kept in this browser.</span>
+      </label>
+      <div class="filename" id="fileName">No file yet.</div>
+    </div>
+
+    <div class="srcpane" id="paneYt" hidden>
+      <div class="ytrow">
+        <input type="url" id="ytIn" placeholder="https://www.youtube.com/watch?v=…   (add &amp;t=30 to start 30 s in)" spellcheck="false">
+        <button class="tbtn" id="ytLoad">Load</button>
+      </div>
+      <div class="ytbox" id="ytBox" hidden><div id="ytPlayer"></div></div>
+    </div>
+
+    <div class="alarm-ctl">
+      <label>Volume <input type="range" id="vol" min="0" max="100" value="80"></label>
+      <label class="chk"><input type="checkbox" id="repeat"> Repeat until RESET</label>
+      <button class="tbtn" id="testSnd">Test sound</button>
+      <button class="tbtn" id="stopSnd">Stop sound</button>
+      <span class="alarm-msg" id="alarmMsg"></span>
+    </div>
+  </section>
+
+  <details id="astarBox">
+    <summary>A* path calculation <span class="sumnote" id="astarSummary">(no path planned yet)</span></summary>
+    <pre id="astarLog">Click a cell in Plan path mode to see every step of the search here.</pre>
+  </details>
+
+  <details>
+    <summary>Serial log</summary>
+    <pre id="log"></pre>
+  </details>
+</main>
+
+<script src="gantry.js"></script>
+<script>
+"use strict";
+const G = window.Gantry;
+const $ = (id) => document.getElementById(id);
+
+let port = null, reader = null, writer = null;
+let state = null, lastStatusAt = 0, connecting = false;
+const enc = new TextEncoder();
+
+// ---- Saved settings (this browser only) ----------------------------------
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
+};
+let gridN = +store.get("gantry.gridN");
+if (!G.GRID_SIZES.includes(gridN)) gridN = 16;
+const obstacles = G.Obstacles.fromString(store.get("gantry.blocked"));
+const saveObstacles = () => store.set("gantry.blocked", obstacles.toString());
+let blockMode = false;
+let plan = null;          // preview: planPath result + goal (nothing moves until GO)
+let planError = "";
+let running = null;       // path sent with GO: { pts: [[x,y], ...] } drawn while it runs
+let planKey = "";
+
+// ---- Build the grid (row 0 at the top = highest Y) and the Z column --------
+let cellEls = [];
+function buildGrid() {
+  const host = $("cells");
+  host.textContent = "";
+  host.style.setProperty("--n", gridN);
+  cellEls = [];
+  for (let row = 0; row < gridN; row++) {
+    const j = gridN - 1 - row;
+    for (let i = 0; i < gridN; i++) {
+      const b = document.createElement("button");
+      b.className = "cell";
+      b.dataset.i = i; b.dataset.j = j;
+      b.setAttribute("aria-label", "Cell " + i + ", " + j);
+      host.appendChild(b);
+      cellEls[j * gridN + i] = b;
+    }
+  }
+  $("sizeSeg").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", +b.dataset.n === gridN));
+}
+G.GRID_SIZES.forEach((n) => {
+  const b = document.createElement("button");
+  b.dataset.n = n; b.textContent = n + "×" + n;
+  b.addEventListener("click", () => {
+    if (n === gridN) return;
+    gridN = n; store.set("gantry.gridN", n);
+    plan = null; planError = ""; planKey = "";
+    buildGrid(); render();
+  });
+  $("sizeSeg").appendChild(b);
+});
+buildGrid();
+
+function setBlockMode(on) {
+  blockMode = on;
+  $("modeMove").setAttribute("aria-pressed", !on);
+  $("modeBlock").setAttribute("aria-pressed", on);
+  render();
+}
+$("modeMove").addEventListener("click", () => setBlockMode(false));
+$("modeBlock").addEventListener("click", () => setBlockMode(true));
+$("clearBlocks").addEventListener("click", () => {
+  if (obstacles.count() && confirm("Clear all blocked cells?")) { obstacles.clear(); saveObstacles(); planKey = ""; render(); }
+});
+
+const cellFromEvent = (ev) => {
+  const el = ev.target.closest ? ev.target.closest(".cell") : null;
+  return el ? [+el.dataset.i, +el.dataset.j] : null;
+};
+const busy = () => !!(state && (state.mode === "MOVE" || state.mode === "HOME"));
+
+// Block mode: click or drag paints cells; the first cell decides block / unblock.
+let paint = null;
+$("cells").addEventListener("pointerdown", (ev) => {
+  const c = cellFromEvent(ev);
+  if (!c) return;
+  ev.preventDefault();
+  if (blockMode) {
+    if (busy()) { planError = "Wait for the move to finish before changing blocked cells (or STOP)."; render(); return; }
+    paint = !obstacles.isBlocked(gridN, c[0], c[1]);
+    obstacles.set(gridN, c[0], c[1], paint);
+    saveObstacles(); planKey = ""; render();
+  } else {
+    choosePathGoal(c);
+  }
+});
+$("cells").addEventListener("pointerover", (ev) => {
+  const c = cellFromEvent(ev);
+  if (!c) return;
+  $("hover").textContent = "cell " + c[0] + ", " + c[1] + " · centre X " + G.cellCenter(gridN, c[0]) +
+                           ", Y " + G.cellCenter(gridN, c[1]) + (obstacles.isBlocked(gridN, c[0], c[1]) ? " · blocked" : "");
+  if (paint !== null && blockMode && ev.buttons) {
+    obstacles.set(gridN, c[0], c[1], paint);
+    saveObstacles(); planKey = ""; render();
+  }
+});
+window.addEventListener("pointerup", () => { paint = null; });
+$("cells").addEventListener("mouseleave", () => { $("hover").textContent = "hover a cell"; });
+
+// Plan mode: preview the A* path to the clicked cell; GO sends it.
+function choosePathGoal(goal) {
+  if (!G.canPlan(state)) {
+    planError = !state ? "Connect the board first." :
+                state.mode !== "IDLE" ? "Wait until the gantry is idle." : "Home X and Y first.";
+    plan = null; render(); return;
+  }
+  plan = { goal };
+  planKey = "";
+  render();
+}
+// Re-plans the preview whenever something it depends on changes.
+function refreshPlan(st) {
+  if (!plan) return;
+  if (!G.canPlan(st)) return;                         // keep the last preview while busy
+  const key = [gridN, st.pos[0], st.pos[1], plan.goal, obstacles.toString()].join("|");
+  if (key === planKey) return;
+  planKey = key;
+  const from = [st.pos[0], st.pos[1]];
+  const r = G.planPath(gridN, obstacles, from, plan.goal, G.PATH_MAX, []);   // [] collects the A* steps
+  plan = Object.assign({ goal: plan.goal }, r);
+  planError = r.ok ? "" : r.error;
+  showTrace(r, from);
+}
+
+// "A* path calculation" panel: every step of the last search
+function showTrace(r, from) {
+  const lines = r.trace ? G.formatTrace(r, from) : ["Not planned: " + r.error];
+  $("astarLog").textContent = lines.join("\n");
+  $("astarSummary").textContent = r.ok
+    ? "(" + gridN + "×" + gridN + ": " + r.expanded + " steps → length " + r.length + ", " + r.turns + " turn" +
+      (r.turns === 1 ? "" : "s") + ", " + r.waypoints.length + " move" + (r.waypoints.length === 1 ? "" : "s") + ")"
+    : "(" + r.error + ")";
+}
+$("goBtn").addEventListener("click", () => {
+  if (!plan || !plan.ok || !G.canPlan(state)) return;
+  planKey = ""; refreshPlan(state);                   // re-check against the latest position
+  if (!plan.ok) { render(); return; }
+  running = { pts: [[state.pos[0], state.pos[1]], ...plan.waypoints], sentAt: Date.now() };
+  send(G.pathCommand(plan.waypoints));
+  $("astarSummary").textContent = $("astarSummary").textContent.replace(/\)$/, ", sent with GO)");
+  plan = null; render();
+});
+$("cancelBtn").addEventListener("click", () => { plan = null; planError = ""; render(); });
+
+for (let row = 0; row < G.Z_LEVELS; row++) {
+  const i = G.Z_LEVELS - 1 - row;        // top = up (4096)
+  const b = document.createElement("button");
+  b.className = "zbtn";
+  b.dataset.btn = "z:" + i;
+  b.textContent = G.zCoord(i);
+  b.title = "Move Z to " + G.zCoord(i);
+  $("zlevels").appendChild(b);
+}
+
+const XY = ["X", "Y"];                    // the table; Z has its own bar
+const rows = XY.map((a) => {
+  const tr = document.createElement("tr");
+  tr.innerHTML = "<td><b>" + a + "</b></td><td></td><td></td><td></td><td></td>" +
+                 '<td class="sw"></td><td class="sw"></td>';
+  $("axisRows").appendChild(tr);
+  return tr.children;
+});
+
+// ---- Rendering -----------------------------------------------------------
+function render() {
+  const live = state && Date.now() - lastStatusAt < 1000;
+  const st = live ? state : null;
+
+  $("dot").className = "dot" + (port ? (live ? " on" : " stale") : "");
+  $("connText").textContent = port ? (live ? "Connected" : "Waiting for board...") : "Not connected";
+  $("connectBtn").textContent = port ? "Disconnect" : "Connect";
+
+  const h = $("hint");
+  h.textContent = port && !live ? "Waiting for status from the board..." : G.hint(st);
+  h.className = "hint" + (st && st.mode === "FAULT" ? " fault" : "");
+
+  // Path preview / running path
+  if (st) refreshPlan(st);
+  if (running && st && Date.now() - running.sentAt > 1500 && !(st.mode === "MOVE" && st.path)) running = null;
+  const tab = obstacles.table(gridN);
+  const pathCells = new Set(plan && plan.ok ? plan.cells.map(([i, j]) => j * gridN + i) : []);
+  const goalIdx = plan && plan.goal ? plan.goal[1] * gridN + plan.goal[0] : -1;
+  cellEls.forEach((b, idx) => {
+    b.classList.toggle("blocked", tab[idx] === 1);
+    b.classList.toggle("onpath", pathCells.has(idx) && tab[idx] !== 1);
+    b.classList.toggle("goal", idx === goalIdx && !tab[idx]);
+  });
+  const pts = running ? running.pts : plan && plan.ok && st ? [[st.pos[0], st.pos[1]], ...plan.waypoints] : [];
+  $("routeLine").setAttribute("points", pts.map(([x, y]) => x + "," + (4096 - y)).join(" "));
+  $("route").classList.toggle("preview", !running);
+  $("plate").classList.toggle("blockmode", blockMode);
+
+  // Plan bar
+  const msg = $("planMsg");
+  let text = "", err = false;
+  if (running && st && st.path) text = "Driving the path: move " + st.path.started + " of " + st.path.total + ".";
+  else if (plan && plan.ok) text = "Path: length " + plan.length + ", " +
+                                   plan.turns + " turn" + (plan.turns === 1 ? "" : "s") + ", " + plan.waypoints.length +
+                                   " move" + (plan.waypoints.length === 1 ? "" : "s") + ". Press GO to drive it.";
+  else if (planError) { text = planError; err = true; }
+  else if (blockMode) text = "Block cells: click or drag to mark where items are. Click a blocked cell to clear it.";
+  else if (G.canPlan(st)) text = "Click a cell to plan a path to it.";
+  msg.textContent = text;
+  msg.className = "msg" + (err ? " err" : "");
+  $("goBtn").hidden = !(plan && plan.ok);
+  $("goBtn").disabled = !port || !G.canPlan(st);
+  $("cancelBtn").hidden = !plan;
+  $("clearBlocks").disabled = obstacles.count() === 0;
+  const cx = st ? G.cellSteps(gridN, st.span[0]) : null, cy = st ? G.cellSteps(gridN, st.span[1]) : null;
+  $("cellSize").textContent = cx && cy ? "cell ≈ " + cx.toFixed(0) + " × " + cy.toFixed(0) + " steps" : "";
+
+  // Carriage marker on the grid (where X and Y really are) and on the Z track
+  const fx = st ? G.gridFraction(st.pos[0]) : null;
+  const fy = st ? G.gridFraction(st.pos[1]) : null;
+  const m = $("marker");
+  m.hidden = fx === null || fy === null;
+  if (!m.hidden) { m.style.left = (fx * 100) + "%"; m.style.top = ((1 - fy) * 100) + "%"; }
+  const fz = st ? G.markerFraction(st.pos[2], G.Z_LEVELS) : null;
+  const zm = $("zmarker");
+  zm.hidden = fz === null;
+  if (!zm.hidden) zm.style.top = ((1 - fz) * 100) + "%";
+  const zHere = st ? G.zIndex(st.pos[2]) : -1;
+  document.querySelectorAll(".zbtn").forEach((b) => b.classList.toggle("here", b.dataset.btn === "z:" + zHere));
+
+  // Limit switches: plate edges for X/Y, ends of the Z track
+  const p = $("plate");
+  p.classList.toggle("xmin", !!(st && st.min[0])); p.classList.toggle("xmax", !!(st && st.max[0]));
+  p.classList.toggle("ymin", !!(st && st.min[1])); p.classList.toggle("ymax", !!(st && st.max[1]));
+  $("zMin").classList.toggle("pressed", !!(st && st.min[2]));
+  $("zMax").classList.toggle("pressed", !!(st && st.max[2]));
+
+  // Buttons
+  document.querySelectorAll("[data-btn]").forEach((el) => {
+    el.disabled = !port || G.commandFor(el.dataset.btn, st) === null;
+  });
+  // E-stop stays usable whenever a port is open, even if status is stale
+  document.querySelector('[data-btn="estop"]').disabled = !port;
+  const keepBtn = document.querySelector('[data-btn="resetkeep"]');
+  keepBtn.hidden = keepBtn.disabled;
+  const homingAxis = st && st.mode === "HOME" ? st.axis : null;
+  $("minBtn").textContent = homingAxis ? homingAxis + " MIN" : "MIN";
+  $("maxBtn").textContent = homingAxis ? homingAxis + " MAX" : "MAX";
+
+  // Z bar readout (dimmed when the firmware has the Z axis off)
+  const zOff = !!(st && st.zOn === false);
+  $("zbar").classList.toggle("off", zOff);
+  $("zOffNote").hidden = !zOff;
+  const homedText = (i) => st ? (st.homed[i] ? "yes" : (homingAxis === G.AXES[i] ? "homing " + st.phase : "no")) : "–";
+  $("zPos").textContent = st && st.pos[2] >= 0 ? st.pos[2] : "–";
+  $("zSteps").textContent = st ? st.steps[2] : "–";
+  $("zSpan").textContent = st && st.span[2] > 0 ? st.span[2] : "–";
+  $("zHomed").textContent = homedText(2);
+
+  // X/Y table
+  XY.forEach((a, i) => {
+    const c = rows[i];
+    c[1].textContent = st && st.pos[i] >= 0 ? st.pos[i] : "–";
+    c[2].textContent = st ? st.steps[i] : "–";
+    c[3].textContent = st && st.span[i] > 0 ? st.span[i] : "–";
+    c[4].textContent = homedText(i);
+    c[5].textContent = st ? (st.min[i] ? "pressed" : "–") : "–";
+    c[6].textContent = st ? (st.max[i] ? "pressed" : "–") : "–";
+    c[5].classList.toggle("on", !!(st && st.min[i]));
+    c[6].classList.toggle("on", !!(st && st.max[i]));
+  });
+  $("rMode").textContent = st ? (homingAxis ? "HOME " + homingAxis + " (" + st.phase + ")" : st.mode) : "–";
+  $("rFault").textContent = st ? st.fault : "–";
+}
+
+function log(line) {
+  const el = $("log");
+  el.textContent += line + "\n";
+  if (el.textContent.length > 20000) el.textContent = el.textContent.slice(-15000);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ---- Serial --------------------------------------------------------------
+async function send(cmd) {
+  if (!writer) return;
+  try { await writer.write(enc.encode(cmd + "\r\n")); log("> " + cmd); }
+  catch (e) { log("! write failed: " + e.message); }
+}
+
+async function openPort(p) {
+  if (connecting || port) return;
+  connecting = true;
+  try {
+    await p.open({ baudRate: 115200 });
+    // Keep the ESP32's auto-reset lines released so connecting doesn't reboot it
+    try { await p.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+    port = p;
+    writer = p.writable.getWriter();
+    log("# connected");
+    readLoop(p);
+    await send("q1");
+  } catch (e) {
+    log("! could not open the port: " + e.message +
+        (e.name === "InvalidStateError" ? "" : " (is the ESP-IDF monitor still open?)"));
+    port = null;
+  } finally {
+    connecting = false;
+    render();
+  }
+}
+
+async function readLoop(p) {
+  const dec = new TextDecoder();
+  const lines = new G.LineBuffer();
+  reader = p.readable.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      for (const line of lines.push(dec.decode(value, { stream: true }))) {
+        const st = G.parseStatus(line);
+        if (st) {
+          const prev = state;
+          state = st; lastStatusAt = Date.now();
+          if (G.estopStarted(prev, st)) alarm.play("E-stop!");
+          else if (G.estopEnded(prev, st)) alarm.stop();
+        }
+        else if (line.trim()) log(line);
+      }
+      render();
+    }
+  } catch (e) {
+    log("! read stopped: " + e.message);
+  } finally {
+    try { reader.releaseLock(); } catch (_) {}
+    reader = null;
+    if (port === p) await closePort();
+  }
+}
+
+async function closePort() {
+  const p = port;
+  port = null; state = null;
+  if (writer) {
+    try { await writer.write(enc.encode("q0\r\n")); } catch (_) {}
+    try { writer.releaseLock(); } catch (_) {}
+    writer = null;
+  }
+  if (reader) { try { await reader.cancel(); } catch (_) {} }
+  if (p) { try { await p.close(); } catch (_) {} log("# disconnected"); }
+  render();
+}
+
+// Use a port this page was already allowed to open, if one is plugged in.
+async function autoConnect() {
+  const ports = (await navigator.serial.getPorts()).filter((p) => G.isEspPort(p.getInfo()));
+  if (ports.length) await openPort(ports[0]);
+}
+
+$("connectBtn").addEventListener("click", async () => {
+  if (port) { await closePort(); return; }
+  try {
+    const p = await navigator.serial.requestPort({ filters: G.USB_FILTERS });
+    await openPort(p);
+  } catch (e) {
+    if (e.name !== "NotFoundError") log("! " + e.message);   // NotFoundError = picker cancelled
+  }
+});
+
+// ---- Buttons -------------------------------------------------------------
+document.addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-btn]");
+  if (!el || el.disabled) return;
+  const cmd = el.dataset.btn === "estop" ? "e" : G.commandFor(el.dataset.btn, state);
+  if (!cmd) return;
+  if (el.dataset.btn === "resetkeep" &&
+      !confirm("Only use this if nothing moved while stopped (no one turned a motor or pushed the carriage).\n\n" +
+               "Keep the current homing?")) return;
+  send(cmd);
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && port) { ev.preventDefault(); send("e"); }
+});
+
+// ---- E-stop sound --------------------------------------------------------
+// Settings in localStorage, the chosen audio file in IndexedDB (both only in
+// this browser). Browsers only allow sound after the page has been clicked
+// once; connecting the board counts.
+const fileDb = {
+  open() {
+    return new Promise((res, rej) => {
+      try {
+        const r = indexedDB.open("gantry-control", 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("files");
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      } catch (e) { rej(e); }
+    });
+  },
+  async put(key, val) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction("files", "readwrite");
+      tx.objectStore("files").put(val, key);
+      tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
+    });
+  },
+  async get(key) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const r = db.transaction("files").objectStore("files").get(key);
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+  },
+};
+
+const alarm = {
+  cfg: { enabled: true, source: "builtin", yt: "", volume: 80, repeat: false },
+  audio: null, fileName: "",
+  ctx: null, sirenTimer: null, sirenNodes: [],
+  yt: { player: null, ready: false, id: null, start: 0, error: "" },
+  playing: false,
+
+  load() {
+    try { Object.assign(this.cfg, JSON.parse(store.get("gantry.alarm") || "{}")); } catch (_) {}
+    $("alarmOn").checked = this.cfg.enabled;
+    $("vol").value = this.cfg.volume;
+    $("repeat").checked = this.cfg.repeat;
+    $("ytIn").value = this.cfg.yt;
+    this.showSource();
+    fileDb.get("estopSound").then((f) => { if (f && f.blob) this.setFile(f.blob, f.name, false); }).catch(() => {});
+    if (this.cfg.source === "youtube" && this.cfg.yt) this.loadYoutube(false);
+  },
+  save() { store.set("gantry.alarm", JSON.stringify(this.cfg)); },
+  msg(text, kind) { const m = $("alarmMsg"); m.textContent = text || ""; m.className = "alarm-msg" + (kind ? " " + kind : ""); },
+
+  showSource() {
+    $("srcSeg").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.src === this.cfg.source));
+    $("paneFile").hidden = this.cfg.source !== "file";
+    $("paneYt").hidden = this.cfg.source !== "youtube";
+    if (this.cfg.source === "youtube" && location.protocol === "file:")
+      this.msg("YouTube won't play on a page opened as a file. Start serve.bat and use http://localhost:8000.", "err");
+    else if (this.cfg.source === "file" && !this.audio) this.msg("Pick a sound file.", "");
+    else this.msg("", "");
+  },
+
+  // ---- sources
+  setFile(blob, name, persist) {
+    if (this.audio) { this.audio.pause(); URL.revokeObjectURL(this.audio.src); }
+    this.audio = new Audio(URL.createObjectURL(blob));
+    this.audio.preload = "auto";
+    this.fileName = name;
+    this.audio.addEventListener("error", () => this.msg("The browser can't play \"" + name + "\". Try mp3 or wav.", "err"));
+    this.audio.addEventListener("ended", () => { if (!this.audio.loop) this.done(); });
+    this.audio.addEventListener("loadedmetadata", () => {
+      $("fileName").textContent = name + " (" + this.audio.duration.toFixed(1) + " s)";
+    });
+    $("fileName").textContent = name;
+    if (persist) fileDb.put("estopSound", { blob, name }).catch(() =>
+      this.msg("Couldn't save the file in this browser; it works until the page is closed.", "err"));
+  },
+  pickFile(f) {
+    if (!f) return;
+    if (!G.isAudioFile(f)) { this.msg("\"" + f.name + "\" isn't an audio file.", "err"); return; }
+    if (f.size > 50 * 1024 * 1024) { this.msg("That file is over 50 MB; pick a shorter sound.", "err"); return; }
+    this.setFile(f, f.name, true);
+    this.cfg.source = "file"; this.save(); this.showSource();
+    this.msg("Loaded. Use Test sound to hear it.", "ok");
+  },
+
+  loadYoutube(announce) {
+    const v = G.youtubeId($("ytIn").value);
+    if (!v) { this.msg("That isn't a YouTube video link.", "err"); return; }
+    this.cfg.yt = $("ytIn").value.trim(); this.cfg.source = "youtube"; this.save(); this.showSource();
+    this.yt.id = v.id; this.yt.start = v.start; this.yt.error = ""; this.yt.ready = false;
+    $("ytBox").hidden = false;
+    const make = () => {
+      if (this.yt.player) {
+        this.yt.player.cueVideoById({ videoId: v.id, startSeconds: v.start });
+        this.yt.ready = true;
+        if (announce) this.msg("Loaded. Use Test sound to hear it.", "ok");
+        return;
+      }
+      this.yt.player = new YT.Player("ytPlayer", {
+        width: 240, height: 135, videoId: v.id,
+        playerVars: { start: v.start, playsinline: 1, rel: 0 },
+        events: {
+          onReady: () => { this.yt.ready = true; if (announce && !this.yt.error) this.msg("Loaded. Use Test sound to hear it.", "ok"); },
+          onError: (e) => { this.yt.error = G.youtubeError(e.data); this.msg(this.yt.error, "err"); if (this.playing) this.siren(); },
+          onStateChange: (e) => {
+            if (e.data === 0 && this.playing) {                   // ended
+              if (this.cfg.repeat) { this.yt.player.seekTo(this.yt.start, true); this.yt.player.playVideo(); }
+              else this.done();
+            }
+          },
+        },
+      });
+    };
+    if (window.YT && window.YT.Player) make();
+    else {
+      window.onYouTubeIframeAPIReady = make;
+      if (!document.getElementById("ytApi")) {
+        const sc = document.createElement("script");
+        sc.id = "ytApi"; sc.src = "https://www.youtube.com/iframe_api";
+        sc.onerror = () => this.msg("Couldn't reach YouTube (offline?). The built-in alarm will play instead.", "err");
+        document.head.appendChild(sc);
+      }
+    }
+  },
+
+  // ---- built-in alarm: two-tone siren made in the browser (no file needed)
+  audioCtx() {
+    try {
+      if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (this.ctx.state === "suspended") this.ctx.resume();
+    } catch (_) { this.ctx = null; }
+    return this.ctx;
+  },
+  siren() {
+    const ctx = this.audioCtx();
+    if (!ctx) return;
+    const burst = () => {
+      const t0 = ctx.currentTime, gain = ctx.createGain(), osc = ctx.createOscillator();
+      osc.type = "square";
+      for (let k = 0; k < 6; k++) osc.frequency.setValueAtTime(k % 2 ? 660 : 990, t0 + k * 0.25);
+      const v = 0.25 * this.cfg.volume / 100;
+      gain.gain.setValueAtTime(0, t0);
+      gain.gain.linearRampToValueAtTime(v, t0 + 0.02);
+      gain.gain.setValueAtTime(v, t0 + 1.45);
+      gain.gain.linearRampToValueAtTime(0, t0 + 1.5);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t0); osc.stop(t0 + 1.5);
+      this.sirenNodes.push(osc);
+      osc.onended = () => { this.sirenNodes = this.sirenNodes.filter((o) => o !== osc); };
+    };
+    burst();
+    clearInterval(this.sirenTimer);
+    this.sirenTimer = this.cfg.repeat ? setInterval(burst, 1700) : setTimeout(() => this.done(), 1600);
+  },
+
+  // ---- play / stop
+  play(why) {
+    if (!this.cfg.enabled && why !== "test") return;
+    this.stop();
+    this.playing = true;
+    $("alarmPanel").classList.add("ringing");
+    const vol = this.cfg.volume / 100;
+    const fallback = (reason) => { if (reason) this.msg(reason, "err"); this.siren(); };
+    if (this.cfg.source === "file" && this.audio) {
+      this.audio.loop = this.cfg.repeat; this.audio.volume = vol; this.audio.currentTime = 0;
+      this.audio.play().catch(() => fallback("The browser blocked the sound file: click anywhere on the page once."));
+    } else if (this.cfg.source === "youtube" && this.yt.player && this.yt.ready && !this.yt.error) {
+      this.yt.player.setVolume(Math.round(vol * 100));
+      this.yt.player.unMute();
+      this.yt.player.seekTo(this.yt.start, true);
+      this.yt.player.playVideo();
+    } else {
+      fallback(this.cfg.source === "builtin" ? "" : "That sound isn't ready, so the built-in alarm played.");
+    }
+    if (why === "E-stop!") log("# E-stop: playing the alarm sound");
+  },
+  done() { this.playing = false; $("alarmPanel").classList.remove("ringing"); },
+  stop() {
+    clearInterval(this.sirenTimer); clearTimeout(this.sirenTimer); this.sirenTimer = null;
+    this.sirenNodes.forEach((o) => { try { o.stop(); } catch (_) {} });
+    this.sirenNodes = [];
+    if (this.audio) { this.audio.pause(); this.audio.loop = false; }
+    if (this.yt.player && this.yt.ready && this.yt.player.pauseVideo) this.yt.player.pauseVideo();
+    this.done();
+  },
+};
+
+$("srcSeg").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-src]");
+  if (!b) return;
+  alarm.cfg.source = b.dataset.src; alarm.save(); alarm.showSource();
+  if (alarm.cfg.source === "youtube" && alarm.cfg.yt && !alarm.yt.player && location.protocol !== "file:") alarm.loadYoutube(false);
+});
+$("alarmOn").addEventListener("change", (e) => { alarm.cfg.enabled = e.target.checked; alarm.save(); });
+$("vol").addEventListener("input", (e) => {
+  alarm.cfg.volume = +e.target.value; alarm.save();
+  if (alarm.audio) alarm.audio.volume = alarm.cfg.volume / 100;
+  if (alarm.yt.player && alarm.yt.ready) alarm.yt.player.setVolume(alarm.cfg.volume);
+});
+$("repeat").addEventListener("change", (e) => { alarm.cfg.repeat = e.target.checked; alarm.save(); });
+$("testSnd").addEventListener("click", () => alarm.play("test"));
+$("stopSnd").addEventListener("click", () => alarm.stop());
+$("fileIn").addEventListener("change", (e) => { alarm.pickFile(e.target.files[0]); e.target.value = ""; });
+const dz = $("dropZone");
+["dragenter", "dragover"].forEach((t) => dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.remove("over"); }));
+dz.addEventListener("drop", (e) => alarm.pickFile(e.dataTransfer.files[0]));
+$("ytLoad").addEventListener("click", () => alarm.loadYoutube(true));
+$("ytIn").addEventListener("keydown", (e) => { if (e.key === "Enter") alarm.loadYoutube(true); });
+// the first click anywhere unlocks sound in the browser
+document.addEventListener("pointerdown", () => alarm.audioCtx(), { once: true });
+alarm.load();
+
+// ---- Start-up ------------------------------------------------------------
+if (!("serial" in navigator)) {
+  $("noSerial").hidden = false;
+  $("connectBtn").disabled = true;
+} else {
+  navigator.serial.addEventListener("connect", (ev) => {
+    if (!port && G.isEspPort(ev.target.getInfo())) openPort(ev.target);
+  });
+  navigator.serial.addEventListener("disconnect", (ev) => {
+    if (ev.target === port) { log("# board unplugged"); closePort(); }
+  });
+  autoConnect();
+}
+
+// Re-ask for status if it stops (e.g. the board rebooted and forgot q1)
+setInterval(() => {
+  if (port && writer && Date.now() - lastStatusAt > 1500) send("q1");
+  render();
+}, 1000);
+window.addEventListener("beforeunload", () => { if (writer) writer.write(enc.encode("q0\r\n")).catch(() => {}); });
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gantry page tests</title>
+</head>
+<body>
+<!-- Open in Chrome/Edge, or headless:
+     msedge --headless=new --dump-dom file:///.../web-control/test.html
+     The result is in <pre id="result">. -->
+<pre id="result">running</pre>
+<script src="gantry.js"></script>
+<script>
+"use strict";
+const G = window.Gantry;
+const out = [];
+let fails = 0, checks = 0;
+function check(cond, msg) { checks++; if (!cond) { fails++; if (fails <= 40) out.push("FAIL " + msg); } }
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// Deterministic random numbers (so a failure can be reproduced)
+let seed = 12345;
+const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+const randInt = (n) => Math.floor(rand() * n);
+
+// --- parseStatus ---------------------------------------------------------
+const line = "@S mode=IDLE axis=- phase=MAX pos=2048,4096,-1 steps=1450,2100,0 span=2900,2100,0 " +
+             "homed=1,1,0 estop=0 min=0,0,1 max=0,1,0 keep=0 fault=NONE";
+const st = G.parseStatus(line);
+check(st && eq(st, { mode: "IDLE", phase: "MAX", axis: null, pos: [2048, 4096, -1], steps: [1450, 2100, 0],
+                     span: [2900, 2100, 0], homed: [true, true, false], min: [false, false, true],
+                     max: [false, true, false], estop: false, keep: false, zOn: true, path: null, fault: "NONE" }),
+      "parse full line: " + JSON.stringify(st));
+const sh = G.parseStatus("@S mode=HOME axis=Z phase=MIN pos=-1,-1,-1 steps=0,0,-120 span=0,0,0 homed=0,0,0 " +
+                         "estop=0 min=0,0,0 max=0,0,0 keep=0 fault=NONE");
+check(sh && sh.axis === "Z" && sh.steps[2] === -120, "homing axis + negative steps");
+const sk = G.parseStatus("@S mode=FAULT axis=- phase=MAX pos=1300,200,4096 steps=910,100,1500 span=2900,2100,1500 " +
+                         "homed=0,0,0 estop=0 min=0,0,0 max=0,0,0 keep=1 fault=ESTOP");
+check(sk && sk.keep && sk.pos[0] === 1300 && !sk.homed[0], "keep=1 parsed, coords kept while faulted");
+check(G.parseStatus("g 20 20" + line) && G.parseStatus("g 20 20" + line).pos[1] === 4096, "marker after echoed text");
+check(G.parseStatus(line + "\r") !== null, "trailing CR");
+const sp = G.parseStatus(line.replace("fault=NONE", "fault=HOME TIMEOUT Z").replace("mode=IDLE", "mode=FAULT"));
+check(sp && sp.fault === "HOME TIMEOUT Z", "fault name with spaces + axis");
+check(G.parseStatus(line.replace("pos=2048,4096,-1", "pos=2048,4096")) === null, "only 2 values rejected");
+check(G.parseStatus(line.replace("homed=1,1,0", "homed=1,x,0")) === null, "garbled value rejected");
+check(G.parseStatus(line.replace(" span=2900,2100,0", "")) === null, "missing field rejected");
+check(G.parseStatus(line.replace("fault=", "zon=0 fault=")).zOn === false, "zon=0 parsed");
+check(G.parseStatus(line.replace("fault=", "zon=1 fault=")).zOn === true, "zon=1 parsed");
+check(eq(G.parseStatus(line.replace("fault=", "path=2/5 fault=")).path, { started: 2, total: 5 }), "path=2/5 parsed");
+check(G.parseStatus(line.replace("fault=", "path=0/0 fault=")).path === null, "path=0/0 = no path");
+check(G.parseStatus(line.replace("fault=", "path=x fault=")).path === null, "garbled path ignored");
+check(G.parseStatus("@S mode=IDLE phase=MIN coord=1 steps=0 span=0 homed=0 estop=0 min=0 max=0 fault=NONE") === null,
+      "old one-axis line rejected");
+check(G.parseStatus("X coord=0 steps=0") === null && G.parseStatus("") === null, "plain lines");
+
+// --- Z bar mapping ---------------------------------------------------------
+check(G.Z_LEVELS === 9 && G.zCoord(0) === 0 && G.zCoord(8) === 4096 && G.zCoord(4) === 2048, "z coords");
+check(G.zIndex(255) === 0 && G.zIndex(256) === 1 && G.zIndex(4096) === 8 && G.zIndex(-1) === -1, "z rounding");
+for (let i = 0; i < G.Z_LEVELS; i++) check(G.zIndex(G.zCoord(i)) === i, "z round trip " + i);
+const near = (a, b) => Math.abs(a - b) < 1e-9;
+check(near(G.markerFraction(0, 9), 0.5 / 9) && near(G.markerFraction(4096, 9), 8.5 / 9), "z marker at button centres");
+check(G.markerFraction(-1, 9) === null, "no z marker when not homed");
+
+// --- grid cells ------------------------------------------------------------
+check(eq(G.GRID_SIZES, [8, 16, 32]) && G.FINE === 32 && G.PATH_MAX === 64, "sizes / limits");
+for (const n of G.GRID_SIZES) {
+  const w = 4096 / n;
+  for (let i = 0; i < n; i++) {
+    const c = G.cellCenter(n, i);
+    check(Number.isInteger(c) && c === i * w + w / 2, `n=${n}: centre of ${i} = ${c}`);
+    check(G.cellOf(n, c) === i, `n=${n}: centre ${c} is in cell ${i}`);
+    check(G.cellOf(n, i * w) === i && G.cellOf(n, (i + 1) * w - 1) === i, `n=${n}: cell ${i} edges`);
+  }
+  check(G.cellOf(n, 0) === 0 && G.cellOf(n, 4096) === n - 1 && G.cellOf(n, -1) === -1, `n=${n}: ends / unhomed`);
+}
+check(G.gridFraction(0) === 0 && G.gridFraction(4096) === 1 && G.gridFraction(2048) === 0.5 && G.gridFraction(-1) === null,
+      "grid marker fraction");
+check(G.cellSteps(16, 2900) === 2900 / 16 && G.cellSteps(8, 0) === null, "cell size in steps");
+
+// --- blocked cells across sizes -------------------------------------------------
+{
+  const o = new G.Obstacles();
+  check(o.count() === 0 && !o.isBlocked(8, 0, 0), "starts empty");
+  o.set(32, 5, 6, true);                               // one fine cell
+  check(o.isBlocked(32, 5, 6) && !o.isBlocked(32, 4, 6), "fine cell blocked");
+  check(o.isBlocked(16, 2, 3) && !o.isBlocked(16, 3, 3), "shows in its 16 x 16 cell");
+  check(o.isBlocked(8, 1, 1) && !o.isBlocked(8, 2, 1) && !o.isBlocked(8, 1, 0), "shows in its 8 x 8 cell");
+  o.set(8, 6, 2, true);                                // a big cell = 16 fine cells
+  check(o.count() === 17, "8 x 8 cell blocks 16 fine cells (" + o.count() + ")");
+  check(o.isBlocked(16, 12, 4) && o.isBlocked(16, 13, 5) && !o.isBlocked(16, 14, 4), "big cell = 4 medium cells");
+  o.set(16, 12, 4, false);                             // unblock a quarter of it
+  check(o.isBlocked(8, 6, 2) && o.count() === 13, "big cell still blocked while part of it is");
+  o.set(8, 6, 2, false);
+  check(!o.isBlocked(8, 6, 2) && o.count() === 1, "unblocking the big cell clears all of it");
+  check(o.isBlocked(8, -1, 0) && o.isBlocked(16, 0, 16), "off the grid counts as blocked");
+  o.set(8, 9, 9, true); check(o.count() === 1, "set off the grid ignored");
+  const back = G.Obstacles.fromString(o.toString());
+  check(back.toString() === o.toString() && back.isBlocked(32, 5, 6), "save / load round trip");
+  check(G.Obstacles.fromString("x,,99999,-1,3").count() === 1, "load ignores junk");
+  check(G.Obstacles.fromString("").count() === 0 && G.Obstacles.fromString(undefined).count() === 0, "load empty");
+  o.clear(); check(o.count() === 0, "clear");
+  const t = new G.Obstacles(); t.set(32, 31, 31, true);
+  const tab = t.table(8);
+  check(tab.length === 64 && tab[63] === 1 && tab.reduce((a, v) => a + v, 0) === 1, "table(8)");
+}
+
+// --- A* (Manhattan) against a brute-force reference --------------------------
+// Reference: plain Dijkstra on (cell, direction) with cost (length, turns),
+// scanning every state (slow but obviously right).
+function reference(n, blocked, s, g) {
+  const S = n * n * 5, len = new Array(S).fill(Infinity), turns = new Array(S).fill(Infinity), done = new Array(S).fill(false);
+  const D = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const sid = (s[1] * n + s[0]) * 5 + 4;
+  len[sid] = 0; turns[sid] = 0;
+  for (;;) {
+    let best = -1;
+    for (let k = 0; k < S; k++)
+      if (!done[k] && len[k] < Infinity && (best < 0 || len[k] < len[best] || (len[k] === len[best] && turns[k] < turns[best]))) best = k;
+    if (best < 0) return null;
+    done[best] = true;
+    const c = Math.floor(best / 5), d = best % 5, i = c % n, j = Math.floor(c / n);
+    if (i === g[0] && j === g[1]) return { length: len[best], turns: turns[best] };
+    for (let nd = 0; nd < 4; nd++) {
+      const ni = i + D[nd][0], nj = j + D[nd][1];
+      if (ni < 0 || nj < 0 || ni >= n || nj >= n || blocked(ni, nj)) continue;
+      const k = (nj * n + ni) * 5 + nd, L = len[best] + 1, T = turns[best] + (d !== 4 && d !== nd ? 1 : 0);
+      if (L < len[k] || (L === len[k] && T < turns[k])) { len[k] = L; turns[k] = T; }
+    }
+  }
+}
+function countTurns(cells) {
+  let t = 0;
+  for (let k = 2; k < cells.length; k++) {
+    const d1 = [cells[k - 1][0] - cells[k - 2][0], cells[k - 1][1] - cells[k - 2][1]];
+    const d2 = [cells[k][0] - cells[k - 1][0], cells[k][1] - cells[k - 1][1]];
+    if (d1[0] !== d2[0] || d1[1] !== d2[1]) t++;
+  }
+  return t;
+}
+{
+  let solved = 0, unreachable = 0;
+  for (let trial = 0; trial < 250; trial++) {
+    const n = trial < 200 ? 8 : 16, density = [0, 0.15, 0.3, 0.45][trial % 4];
+    const grid = Array.from({ length: n * n }, () => rand() < density);
+    const blocked = (i, j) => grid[j * n + i];
+    const s = [randInt(n), randInt(n)], g = [randInt(n), randInt(n)];
+    if (blocked(g[0], g[1]) && (g[0] !== s[0] || g[1] !== s[1])) {
+      check(G.astar(n, blocked, s, g) === null, `trial ${trial}: blocked goal -> null`);
+      continue;
+    }
+    const got = G.astar(n, blocked, s, g);
+    // reference for every 8 x 8 case, every 10th 16 x 16 one, and whenever A* finds nothing
+    const want = n === 8 || trial % 10 === 0 || !got ? reference(n, blocked, s, g) : undefined;
+    if (want === null) { unreachable++; check(got === null, `trial ${trial}: unreachable but A* found a path`); continue; }
+    if (!got) { check(false, `trial ${trial}: A* found no path`); continue; }
+    solved++;
+    const c = got.cells;
+    check(eq(c[0], s) && eq(c[c.length - 1], g), `trial ${trial}: starts at start, ends at goal`);
+    check(got.length === c.length - 1 && got.turns === countTurns(c), `trial ${trial}: length / turns match the cells`);
+    for (let k = 1; k < c.length; k++) {
+      check(Math.abs(c[k][0] - c[k - 1][0]) + Math.abs(c[k][1] - c[k - 1][1]) === 1, `trial ${trial}: step ${k} not 4-way`);
+      check(!blocked(c[k][0], c[k][1]), `trial ${trial}: path enters blocked cell ${c[k]}`);
+    }
+    if (want) {
+      check(got.length === want.length, `trial ${trial}: length ${got.length}, shortest is ${want.length}`);
+      check(got.turns === want.turns, `trial ${trial}: ${got.turns} turns, fewest is ${want.turns}`);
+    }
+  }
+  check(solved > 100 && unreachable > 3, `random cases cover both (solved ${solved}, unreachable ${unreachable})`);
+  // The start cell may be blocked (the carriage is already there)
+  const g2 = (i, j) => i === 0 && j === 0;
+  check(G.astar(8, g2, [0, 0], [3, 0]) && G.astar(8, g2, [0, 0], [3, 0]).length === 3, "can leave a blocked start cell");
+  check(G.astar(8, () => false, [9, 0], [1, 1]) === null, "start off the grid");
+  // Manhattan guidance: on an open 32 x 32 grid A* expands few states for a straight trip
+  const open = G.astar(32, () => false, [0, 0], [31, 0]);
+  check(open.length === 31 && open.turns === 0 && open.expanded < 200, `heuristic guides the search (expanded ${open.expanded})`);
+  const diag = G.astar(32, () => false, [0, 0], [31, 31]);
+  check(diag.length === 62 && diag.turns === 1, `open diagonal trip = one L, not a staircase (${diag.turns} turns)`);
+}
+
+// --- corners ---------------------------------------------------------------
+check(eq(G.corners([[0, 0], [1, 0], [2, 0], [2, 1], [2, 2]]), [[0, 0], [2, 0], [2, 2]]), "corners of an L");
+check(eq(G.corners([[0, 0]]), [[0, 0]]) && eq(G.corners([[0, 0], [1, 0]]), [[0, 0], [1, 0]]), "short paths");
+check(eq(G.corners([[0, 0], [0, 1], [1, 1], [1, 2]]), [[0, 0], [0, 1], [1, 1], [1, 2]]), "staircase keeps every corner");
+
+// --- planPath: the whole plan sent to the board ---------------------------------
+// Every move must be along X or Y and only cross free cells (the start cell is allowed).
+function checkPlan(n, o, pos, goal, plan, name) {
+  if (!plan.ok) { check(false, name + ": " + plan.error); return; }
+  const tab = o.table(n), start = [G.cellOf(n, pos[0]), G.cellOf(n, pos[1])];
+  let at = pos.slice();
+  const wps = plan.waypoints;
+  check(wps.length >= 1 && wps.length <= G.PATH_MAX, name + ": waypoint count " + wps.length);
+  check(eq(wps[wps.length - 1], [G.cellCenter(n, goal[0]), G.cellCenter(n, goal[1])]), name + ": ends at the goal centre");
+  for (const w of wps) {
+    check(w.every((v) => Number.isInteger(v) && v >= 0 && v <= 4096), name + ": waypoint in range " + w);
+    const alongX = w[1] === at[1], alongY = w[0] === at[0];
+    check(alongX !== alongY, name + ": move " + at + " -> " + w + " is not along one axis");
+    // cells this move passes through
+    const fixedCell = alongX ? G.cellOf(n, at[1]) : G.cellOf(n, at[0]);
+    const a = G.cellOf(n, alongX ? at[0] : at[1]), b = G.cellOf(n, alongX ? w[0] : w[1]);
+    for (let c = Math.min(a, b); c <= Math.max(a, b); c++) {
+      const [ci, cj] = alongX ? [c, fixedCell] : [fixedCell, c];
+      if (ci === start[0] && cj === start[1]) continue;
+      check(!tab[cj * n + ci], name + ": move " + at + " -> " + w + " crosses blocked cell " + ci + "," + cj);
+    }
+    at = w;
+  }
+}
+{
+  const o = new G.Obstacles();
+  // After homing: at 0,0, open 8 x 8 grid, to the far corner
+  let p = G.planPath(8, o, [0, 0], [7, 7]);
+  checkPlan(8, o, [0, 0], [7, 7], p, "home to far corner");
+  check(p.ok && p.waypoints.length === 3 && p.turns === 1, "home -> far corner: line up + one L (" + JSON.stringify(p.waypoints) + ")");
+  // Wall across the middle with one gap
+  for (let i = 0; i < 8; i++) if (i !== 6) o.set(8, i, 4, true);
+  p = G.planPath(8, o, [256, 256], [1, 7]);
+  checkPlan(8, o, [256, 256], [1, 7], p, "through the gap");
+  check(p.ok && p.cells.some(([i, j]) => i === 6 && j === 4), "path uses the gap");
+  // Same obstacles, other sizes: the wall carries over
+  for (const n of [16, 32]) {
+    const q = G.planPath(n, o, [256, 256], [G.cellOf(n, 640), G.cellOf(n, 3840)]);
+    checkPlan(n, o, [256, 256], [G.cellOf(n, 640), G.cellOf(n, 3840)], q, "gap at size " + n);
+    check(q.ok && q.cells.every(([i, j]) => !o.isBlocked(n, i, j) || (i === q.start[0] && j === q.start[1])), "size " + n + " avoids the wall");
+  }
+  // Errors
+  check(/blocked/.test(G.planPath(8, o, [256, 256], [0, 4]).error), "goal blocked");
+  o.set(8, 6, 4, true);
+  check(/walled off/.test(G.planPath(8, o, [256, 256], [1, 7]).error), "no way through");
+  check(/Already there/.test(G.planPath(8, o, [256, 256], [0, 0]).error), "already at the goal centre");
+  check(/Home/.test(G.planPath(8, o, [-1, 256], [1, 1]).error), "not homed");
+  check(/Unknown/.test(G.planPath(10, o, [0, 0], [1, 1]).error), "bad size");
+  check(/too many turns/.test(G.planPath(8, new G.Obstacles(), [0, 0], [7, 7], 2).error), "move limit enforced");
+  // Goal = start cell, carriage off-centre: lines up in two moves
+  p = G.planPath(8, o, [100, 300], [0, 1]);
+  check(p.ok && eq(p.waypoints, [[100, 768], [256, 768]]) === false, "start cell is 0,0 here, so goal 0,1 is another cell");
+  p = G.planPath(8, new G.Obstacles(), [100, 300], [0, 0]);
+  check(p.ok && eq(p.waypoints, [[100, 256], [256, 256]]), "centre up inside the start cell: " + JSON.stringify(p.waypoints));
+  // Carriage sitting in a blocked cell can still leave it
+  const ob = new G.Obstacles(); ob.set(8, 0, 0, true);
+  p = G.planPath(8, ob, [0, 0], [3, 0]);
+  checkPlan(8, ob, [0, 0], [3, 0], p, "leave a blocked start cell");
+
+  // Random plans at every size
+  for (let trial = 0; trial < 120; trial++) {
+    const n = G.GRID_SIZES[trial % 3], oo = new G.Obstacles();
+    for (let k = 0; k < n * n * 0.25; k++) oo.set(n, randInt(n), randInt(n), true);
+    const pos = [randInt(4097), randInt(4097)], goal = [randInt(n), randInt(n)];
+    const pl = G.planPath(n, oo, pos, goal);
+    if (pl.ok) checkPlan(n, oo, pos, goal, pl, `random plan ${trial} (n=${n})`);
+    else check(/blocked|walled off|Already there/.test(pl.error), `random plan ${trial}: unexpected error ${pl.error}`);
+  }
+}
+check(G.pathCommand([[256, 256], [3840, 256], [3840, 3840]]) === "w 256 256 3840 256 3840 3840", "path command");
+
+// --- A* step log (the "A* path calculation" panel) -------------------------
+{
+  const man = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
+  for (let trial = 0; trial < 60; trial++) {
+    const n = trial % 2 ? 16 : 8;
+    const grid = Array.from({ length: n * n }, () => rand() < 0.3);
+    const blocked = (i, j) => grid[j * n + i];
+    const s = [randInt(n), randInt(n)], g = [randInt(n), randInt(n)];
+    const tr = [];
+    const a = G.astar(n, blocked, s, g), b = G.astar(n, blocked, s, g, tr);
+    check(eq(a, b), `trace ${trial}: recording the steps doesn't change the result`);
+    check(tr[0].type === "start" && eq(tr[0].start, s) && eq(tr[0].goal, g) && tr[0].h === man(s, g), `trace ${trial}: starts with the setup`);
+    const ex = tr.filter((e) => e.type === "expand");
+    const last = tr[tr.length - 1];
+    if (b) {
+      check(last.type === "goal" && last.length === b.length && last.turns === b.turns, `trace ${trial}: ends at the goal`);
+      check(ex.length === b.expanded && eq(ex[ex.length - 1].cell, g), `trace ${trial}: one expand line per expanded state`);
+    } else {
+      check(last.type === "fail", `trace ${trial}: ends with no path`);
+    }
+    if (ex.length) check(eq(ex[0].cell, s) && ex[0].g === 0 && ex[0].dir === 4, `trace ${trial}: first expansion is the start`);
+    // consistent Manhattan heuristic: f never goes down from one expansion to the next
+    for (let k = 1; k < ex.length; k++) check(ex[k].f >= ex[k - 1].f, `trace ${trial}: f decreased at step ${k + 1}`);
+    for (const e of tr) {
+      if (e.type === "push") check(e.h === man(e.cell, g) && e.f === e.g + e.h && !blocked(e.cell[0], e.cell[1]),
+                                   `trace ${trial}: push ${e.cell} has h = Manhattan, f = g + h`);
+      if (e.type === "skip" && e.reason === "blocked") check(blocked(e.cell[0], e.cell[1]), `trace ${trial}: skip ${e.cell} really blocked`);
+      if (e.type === "expand") check(e.h === man(e.cell, g) && e.f === e.g + e.h, `trace ${trial}: expand ${e.cell} f = g + h`);
+    }
+  }
+  // Text for the panel
+  const o = new G.Obstacles();
+  for (let j = 0; j < 6; j++) o.set(8, 3, j, true);
+  const p = G.planPath(8, o, [0, 0], [6, 1], G.PATH_MAX, []);
+  const text = G.formatTrace(p, [0, 0]).join("\n");
+  check(p.ok && /^A\* on a 8×8 grid, start cell \(0,0\) → goal cell \(6,1\)/.test(text), "panel: header");
+  check(/Manhattan/.test(text) && /f = g \+ h/.test(text), "panel: explains h and f");
+  check((text.match(/ expand /g) || []).length === p.expanded, "panel: one line per expanded state");
+  check(/x \(3,\d\) +→  blocked cell/.test(text), "panel: blocked neighbours shown");
+  check(new RegExp("Goal reached at step #" + p.expanded + ": length " + p.length + " ").test(text), "panel: goal line");
+  check(text.includes("Command: " + G.pathCommand(p.waypoints)), "panel: exact command GO sends");
+  check(text.includes("Corners") && text.includes("line up inside the start cell"), "panel: corners and moves");
+  // Huge search: steps are shortened, the result never is
+  const big = G.planPath(32, new G.Obstacles(), [0, 0], [31, 31], G.PATH_MAX, []);
+  const short = G.formatTrace(big, [0, 0], 40);
+  check(short.some((l) => /search lines not shown/.test(l)) && short.some((l) => l.startsWith("Command: w ")) &&
+        short.some((l) => /^Goal reached/.test(l)), "panel: long search shortened, result kept");
+  check(short.length < 70, "panel: shortened to about maxLines (" + short.length + ")");
+  // No path / not planned
+  const wall = new G.Obstacles();
+  for (let j = 0; j < 8; j++) wall.set(8, 4, j, true);
+  const np = G.planPath(8, wall, [0, 0], [6, 6], G.PATH_MAX, []);
+  check(!np.ok && G.formatTrace(np, [0, 0]).some((l) => /open list ran out/.test(l)), "panel: walled off explained");
+  check(G.formatTrace(G.planPath(8, wall, [0, 0], [4, 4], G.PATH_MAX, []), [0, 0]).length === 0,
+        "panel: blocked goal is refused before the search (nothing to show)");
+  check(G.formatTrace(null).length === 0 && G.formatTrace(G.planPath(8, wall, [0, 0], [6, 6])).length === 0,
+        "panel: no trace asked -> nothing");
+}
+
+// --- buttons ---------------------------------------------------------------
+const S = (o) => Object.assign({ mode: "IDLE", phase: "MIN", axis: null, pos: [-1, -1, -1], steps: [0, 0, 0],
+                                 span: [0, 0, 0], homed: [false, false, false], min: [false, false, false],
+                                 max: [false, false, false], estop: false, keep: false, zOn: true, path: null,
+                                 fault: "NONE" }, o);
+const unhomed = S({});
+const allHomed = S({ homed: [true, true, true], pos: [1000, 2000, 4096], span: [2900, 2100, 1500] });
+const xyOnly = S({ homed: [true, true, false] }), zOnly = S({ homed: [false, false, true] });
+const homingZmin = S({ mode: "HOME", axis: "Z", phase: "MIN" });
+const homingYmax = S({ mode: "HOME", axis: "Y", phase: "MAX", steps: [2900, 400, 1500] });
+const moving = S({ mode: "MOVE", homed: [true, true, true] });
+const faulted = S({ mode: "FAULT", fault: "LIMIT Y" }), faultedHeld = S({ mode: "FAULT", fault: "ESTOP", estop: true });
+const keepable = S({ mode: "FAULT", fault: "ESTOP", keep: true });
+const keepableHeld = S({ mode: "FAULT", fault: "ESTOP", keep: true, estop: true });
+
+const table = [
+  ["estop", unhomed, "e"], ["estop", moving, "e"], ["estop", faulted, "e"],
+  ["stop", moving, "x"], ["stop", homingZmin, "x"], ["stop", allHomed, null], ["stop", faulted, null],
+  ["home", unhomed, "h"], ["home", allHomed, "h"], ["home", homingZmin, null], ["home", faulted, null], ["home", moving, null],
+  ["home:X", unhomed, "h x"], ["home:Y", allHomed, "h y"], ["home:Z", unhomed, "h z"],
+  ["home:Z", homingYmax, null], ["home:W", unhomed, null],
+  ["reset", faulted, "r"], ["reset", faultedHeld, null], ["reset", allHomed, null], ["reset", keepable, "r"],
+  ["resetkeep", keepable, "r k"], ["resetkeep", keepableHeld, null], ["resetkeep", faulted, null],
+  ["resetkeep", allHomed, null],
+  ["min", homingZmin, "pz0"], ["max", homingZmin, "pz1"], ["min", homingYmax, "py0"], ["max", homingYmax, "py1"],
+  ["min", allHomed, null], ["max", unhomed, null], ["min", faulted, null],
+  ["min", S({ mode: "HOME", axis: "X" }), "px0"],
+  ["z:0", allHomed, "z 0"], ["z:8", allHomed, "z 4096"], ["z:3", zOnly, "z 1536"],
+  ["z:3", xyOnly, null], ["z:3", moving, null], ["z:9", allHomed, null],
+  ["cell:1:1", allHomed, null], ["nope", allHomed, null],
+  // Z disabled in firmware (zon=0): no Z homing or moves, X/Y unaffected
+  ["home:Z", S({ zOn: false }), null], ["z:3", S({ zOn: false, homed: [true, true, true] }), null],
+  ["home", S({ zOn: false }), "h"], ["home:X", S({ zOn: false }), "h x"],
+];
+for (const [btn, s, want] of table) {
+  const got = G.commandFor(btn, s);
+  check(got === want, `commandFor(${btn}, ${s.mode}/${s.axis}/homed=${s.homed}) = ${got}, want ${want}`);
+}
+check(G.commandFor("estop", null) === null, "no status -> nothing (index.html sends e directly)");
+check(G.canPlan(allHomed) && G.canPlan(xyOnly) && !G.canPlan(zOnly) && !G.canPlan(moving) && !G.canPlan(null) &&
+      !G.canPlan(faulted), "path planning only when idle with X and Y homed");
+
+// --- hint ---------------------------------------------------------------
+check(/Connect/.test(G.hint(null)), "hint: no status");
+check(/HOME ALL/.test(G.hint(unhomed)) && /0,0/.test(G.hint(unhomed)), "hint: not homed, ends at 0,0");
+check(/Homing Z/.test(G.hint(homingZmin)) && /keypad D/.test(G.hint(homingZmin)), "hint: Z seeking MIN, key D");
+check(/Homing Y/.test(G.hint(homingYmax)) && /400 steps/.test(G.hint(homingYmax)) && /keypad 3/.test(G.hint(homingYmax)),
+      "hint: Y measuring, key 3");
+check(/Not homed yet: Z/.test(G.hint(xyOnly)) && /X, Y/.test(G.hint(zOnly)), "hint: partly homed");
+check(/RESET/.test(G.hint(faulted)) && /LIMIT Y/.test(G.hint(faulted)) && /Release/.test(G.hint(faultedHeld)), "hint: faults");
+check(/keep home/.test(G.hint(keepable)) && !/keep home/.test(G.hint(faulted)), "hint: keep-home only when allowed");
+check(/plan a path/.test(G.hint(allHomed)), "hint: homed");
+const zOff = (o) => S(Object.assign({ zOn: false }, o));
+check(/X, then Y\)/.test(G.hint(zOff({}))) && !/Z/.test(G.hint(zOff({}))), "hint: Z off, HOME ALL = X then Y");
+check(/Z, then X, then Y/.test(G.hint(unhomed)), "hint: Z on, Z first");
+check(/^Homed/.test(G.hint(zOff({ homed: [true, true, false] }))) && !/Z bar/.test(G.hint(zOff({ homed: [true, true, false] }))),
+      "hint: X, Y homed is enough when Z is off");
+check(/Not homed yet: Y\./.test(G.hint(zOff({ homed: [true, false, false] }))), "hint: Z off, only Y missing");
+check(/Moving/.test(G.hint(moving)), "hint: moving");
+check(/move 2 of 5/.test(G.hint(S({ mode: "MOVE", path: { started: 2, total: 5 } }))), "hint: path progress");
+
+// --- E-stop sound triggers ----------------------------------------------------
+{
+  const idle = S({}), est = S({ mode: "FAULT", fault: "ESTOP" }), estHeld = S({ mode: "FAULT", fault: "ESTOP", estop: true });
+  const lim = S({ mode: "FAULT", fault: "LIMIT X" }), mov = S({ mode: "MOVE" });
+  check(G.isEstop(est) && G.isEstop(estHeld) && !G.isEstop(lim) && !G.isEstop(idle) && !G.isEstop(null), "isEstop");
+  check(G.estopStarted(idle, est) && G.estopStarted(mov, estHeld), "plays when the E-stop trips (page button or keypad)");
+  check(G.estopStarted(lim, est), "plays if the E-stop comes on top of another fault's reset sequence");
+  check(!G.estopStarted(est, est) && !G.estopStarted(est, estHeld), "plays once, not on every status line");
+  check(!G.estopStarted(null, est), "quiet when the page connects to an already stopped board");
+  check(!G.estopStarted(idle, lim) && !G.estopStarted(idle, mov), "other faults don't play it");
+  check(G.estopEnded(est, idle) && G.estopEnded(estHeld, idle), "RESET stops a repeating sound");
+  check(!G.estopEnded(est, est) && !G.estopEnded(idle, idle) && !G.estopEnded(est, null), "no stop otherwise");
+  // A whole session: status lines in order -> how many times it plays
+  const seq = [idle, mov, mov, est, est, estHeld, est, idle, idle, est, est, idle];
+  let plays = 0, stops = 0;
+  for (let k = 1; k < seq.length; k++) { if (G.estopStarted(seq[k - 1], seq[k])) plays++; if (G.estopEnded(seq[k - 1], seq[k])) stops++; }
+  check(plays === 2 && stops === 2, `session: 2 E-stops -> 2 plays, 2 stops (got ${plays}, ${stops})`);
+}
+
+// --- YouTube links and audio files ------------------------------------------
+{
+  const yt = (u) => JSON.stringify(G.youtubeId(u));
+  const id = "dQw4w9WgXcQ";
+  const good = [
+    ["https://www.youtube.com/watch?v=" + id, 0], ["https://youtube.com/watch?v=" + id + "&t=42", 42],
+    ["https://youtu.be/" + id, 0], ["https://youtu.be/" + id + "?t=1m30s", 90], ["youtu.be/" + id, 0],
+    ["https://www.youtube.com/shorts/" + id, 0], ["https://www.youtube.com/embed/" + id + "?start=7", 7],
+    ["https://m.youtube.com/watch?v=" + id + "&feature=share", 0], ["https://music.youtube.com/watch?v=" + id, 0],
+    ["https://www.youtube.com/live/" + id, 0], ["https://www.youtube-nocookie.com/embed/" + id, 0],
+    ["  https://www.youtube.com/watch?list=PL1&v=" + id + "&t=1h2m3s  ", 3723], [id, 0],
+  ];
+  for (const [u, start] of good) check(yt(u) === JSON.stringify({ id, start }), "youtube link " + u.trim() + " -> " + yt(u));
+  for (const u of ["", "hello", "https://vimeo.com/123", "https://www.youtube.com/watch?v=short", "https://www.youtube.com/",
+                   "https://youtu.be/", "https://evil.com/watch?v=" + id, "https://youtube.com.evil.com/watch?v=" + id])
+    check(G.youtubeId(u) === null, "not a YouTube video: " + u);
+  check(G.parseYoutubeTime("90") === 90 && G.parseYoutubeTime("90s") === 90 && G.parseYoutubeTime("2m") === 120 &&
+        G.parseYoutubeTime("x") === 0 && G.parseYoutubeTime(null) === 0, "start times");
+  check(/serve\.bat/.test(G.youtubeError(153)) && /owner/.test(G.youtubeError(150)) && /owner/.test(G.youtubeError(101)) &&
+        /not found/.test(G.youtubeError(100)) && /error 999/.test(G.youtubeError(999)), "YouTube error messages");
+  check(G.isAudioFile({ name: "siren.mp3", type: "audio/mpeg" }) && G.isAudioFile({ name: "alarm.WAV", type: "" }) &&
+        G.isAudioFile({ name: "x", type: "audio/ogg" }), "audio files accepted");
+  check(!G.isAudioFile({ name: "photo.png", type: "image/png" }) && !G.isAudioFile({ name: "a.txt", type: "text/plain" }) &&
+        !G.isAudioFile(null), "other files refused");
+}
+
+// --- LineBuffer ---------------------------------------------------------
+const lb = new G.LineBuffer();
+check(eq(lb.push("ab"), []), "partial line held");
+check(eq(lb.push("c\r\nde\nf"), ["abc", "de"]), "split CRLF and LF");
+check(eq(lb.push("\n"), ["f"]), "rest released on newline");
+check(eq(new G.LineBuffer().push("x\n\ny\n"), ["x", "", "y"]), "empty line kept");
+
+// --- USB filter ---------------------------------------------------------
+check(G.isEspPort({ usbVendorId: 0x1a86, usbProductId: 0x7523 }), "CH340 accepted");
+check(!G.isEspPort({ usbVendorId: 0x046d }) && !G.isEspPort({}) && !G.isEspPort(undefined), "other devices rejected");
+
+out.push(fails ? `FAILED (${fails} of ${checks} checks)` : `ALL TESTS PASSED (${checks} checks, 0 failures)`);
+document.getElementById("result").textContent = out.join("\n");
+</script>
+</body>
+</html>

@@ -1,0 +1,128 @@
+ESP32 BREADBOARD TEST BENCH - PIN PLAN (3-axis revision: X, Y, Z steppers + keypad)
+=====================================================================================
+
+Change from the previous plan: the board now runs ONLY the steppers and the
+keypad. The LCD, MPU6050, ultrasonic, servo, thermistor, joystick, vibration
+switch, fault LED and buzzer are gone from the firmware - UNPLUG THEM before
+flashing, because several of their pins are now stepper outputs (a joystick
+or vibration switch to GND on GPIO 18 / 19 would short a driven-high output).
+
+Three 28BYJ-48 + ULN2003 boards: X and Y move the carriage, Z raises and
+lowers an attachment.
+
+
+STEPPERS (ULN2003 IN1..IN4)
+---------------------------
+
+  (Z is switched off in the firmware for now: USE_Z_AXIS 0. Only X and Y
+   need wiring; Z's pins stay low.)
+
+  Axis  IN1  IN2  IN3  IN4
+  X     13   14   27   26     (unchanged)
+  Y     23   22   21   19
+  Z     18   25   15   2
+
+  - Driver board + to 5V, - to GND. Three motors draw up to ~0.7 A together,
+    more than USB comfortably gives: power the driver boards from the kit's
+    breadboard power module (5V) and tie its GND to the ESP32 GND.
+    (Motors that haven't stepped for 0.5 s are switched off to save power.)
+  - GPIO 2 is the on-board LED: it flickers with Z's IN4. GPIO 2 and 15 are
+    boot-strapping pins; the ULN2003 inputs pull them low, which is fine
+    (GPIO 15 low only hides the ROM boot messages).
+  - GPIO 14 and 15 put out a short signal at boot: X and Z may twitch once.
+
+
+KEYPAD LAYOUT (as printed on the keypad)
+----------------------------------------
+
+          C1   C2   C3   C4
+    R1     1    2    3    A        1 = X MAX   3 = Y MAX   A = Z MAX (up)
+    R2     4    5    6    B
+    R3     7    8    9    C
+    R4     *    0    #    D        * = E-STOP  0 = X MIN   # = Y MIN   D = Z MIN (down)
+
+  Column C3 is the Y axis, column C4 the Z axis (bottom = MIN, top = MAX).
+  2 and the keys on R2 / R3 do nothing.
+
+
+KEYPAD WIRING (6 of the 8 ribbon pins)
+--------------------------------------
+
+Pin numbers are the ones PRINTED on the keypad connector: 8-5 = R1-R4,
+4-1 = C1-C4.
+
+  Printed pin  Line   Goes to                       Mode in firmware
+  -----------  ----   ---------------------------   ---------------------------------
+  8            R1     GPIO 33                       open-drain output (hi-Z / low)
+  7            R2     not connected
+  6            R3     not connected
+  5            R4     GND (extension board GND)     -
+  4            C1     GPIO 4                        input, internal pull-up
+  3            C2     GPIO 32                       input, internal pull-up
+  2            C3     GPIO 34 + 10k to 3.3V         input (NO internal pull-up on 34)
+  1            C4     GPIO 35 + 10k to 3.3V         input (NO internal pull-up on 35)
+
+  GPIO 34 / 35 are input-only and have no pull-ups: the two 10k resistors
+  are required. In main.c, USE_YZ_KEYS is 0 until they are wired; while it
+  is 0 the Y / Z limits come only from the web page's MIN / MAX buttons
+  (or py0 / py1 / pz0 / pz1 in the monitor). A floating 34 / 35 would read
+  as random limit presses.
+
+
+HOW THE FIRMWARE READS IT (every 1 ms tick)
+-------------------------------------------
+
+  1. R1 (GPIO 33) released (hi-Z).
+     GPIO 4 low = E-STOP (*), 32 low = X MIN (0), 34 low = Y MIN (#), 35 low = Z MIN (D)
+  2. Drive R1 low, wait 10 us.
+     GPIO 4 low = X MAX (1), 34 low = Y MAX (3), 35 low = Z MAX (A)
+     ...unless that column was already low in step 1: then its MAX reads
+     released (* hides X MAX, # hides Y MAX, D hides Z MAX). A real axis
+     can't be at both ends at once.
+  3. Release R1, wait 20 us.
+
+  - GPIO 33 must be OPEN-DRAIN, never push-pull high: driven high with a
+    row-1 key and a row-4 key in the same column held, it would short to GND.
+  - Every keypad read goes through kp_read() (locked by keypadMux).
+
+
+VERIFIED (test/test_keypad.c: all 65,536 key combinations, both wirings)
+------------------------------------------------------------------------
+
+  - Each single key gives exactly its mapping; all other keys do nothing.
+  - No missed presses, except a MAX hidden by its own column's static key.
+  - False presses ("ghost" keys, normal for a matrix keypad without
+    diodes) need 3 or more keys held at once.
+
+
+SAFETY NOTE
+-----------
+
+Like push buttons, this is "press = pull to GND". If the R4 -> GND wire or
+the ribbon comes loose, * and the MIN keys silently stop working. A real
+E-stop should be normally-closed so a broken wire trips it.
+
+
+FULL PIN MAP
+------------
+
+  GPIO  Part                       GPIO  Part
+  ----  -------------------------  ----  -----------------------------------
+  2     Z stepper IN4              22    Y stepper IN2
+  4     Keypad C1 (* E-STOP, 1)    23    Y stepper IN1
+  13    X stepper IN1              25    Z stepper IN2
+  14    X stepper IN2              26    X stepper IN4
+  15    Z stepper IN3              27    X stepper IN3
+  18    Z stepper IN1              32    Keypad C2 (0 X MIN)
+  19    Y stepper IN4              33    Keypad R1 (scan line for 1, 3, A)
+  21    Y stepper IN3              34    Keypad C3 (# Y MIN, 3 Y MAX) + 10k pull-up
+                                   35    Keypad C4 (D Z MIN, A Z MAX) + 10k pull-up
+  --    Keypad R4 -> GND
+
+  Free: 36, 39 (input only).
+  Never use: 0, 5, 12 (boot pins), 6-11 (flash), 16-17 (PSRAM),
+             1 and 3 (USB serial).
+  The camera must stay unplugged (it shares GPIO 4 and most of the pins above).
+
+
+claude --resume 68c684ad-119f-4cb8-9291-5c6556d7d1e4
