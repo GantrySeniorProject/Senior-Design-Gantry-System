@@ -59,6 +59,7 @@ typedef enum { HOME_CONTINUE, HOME_FOUND_MIN, HOME_FOUND_MAX,
 // One homing decision per control tick. pos = current step (0 at MIN once found),
 // phaseSteps = steps taken in this phase. The limit for the other end is ignored:
 // right after MIN is found its switch is still pressed while the carriage leaves it.
+// maxSteps <= 0 means no limit: homing keeps going until the switch is pressed.
 static inline home_event_t home_check(home_phase_t phase, bool limMin, bool limMax,
                                       int32_t pos, int32_t phaseSteps, int32_t maxSteps) {
   if (phase == HOME_SEEK_MIN) {
@@ -66,6 +67,6 @@ static inline home_event_t home_check(home_phase_t phase, bool limMin, bool limM
   } else if (limMax) {
     return pos >= RAIL_MIN_SPAN ? HOME_FOUND_MAX : HOME_ERR_SHORT;
   }
-  if (phaseSteps > maxSteps) return HOME_ERR_TIMEOUT;
+  if (maxSteps > 0 && phaseSteps > maxSteps) return HOME_ERR_TIMEOUT;
   return HOME_CONTINUE;
 }

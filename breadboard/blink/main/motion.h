@@ -41,6 +41,13 @@ typedef enum { MOVE_OK, MOVE_BUSY, MOVE_NOT_HOMED, MOVE_BAD_PATH } move_result_t
 
 #define MOTION_PATH_MAX 64   // waypoints in one path
 
+// Next half-step phase (0..7) for one step in direction dir (+1 / -1);
+// reverse flips which way the motor turns for the same commanded direction.
+static inline uint8_t stepper_phase_next(uint8_t idx, int dir, bool reverse) {
+  bool fwd = (dir > 0) != reverse;
+  return (uint8_t)((idx + (fwd ? 1 : 7)) & 7);
+}
+
 static inline char motion_axis_name(int a) { return a >= 0 && a < MOTION_AXES ? "XYZ"[a] : '-'; }
 static inline const char *motion_mode_name(motion_mode_t m) {
   switch (m) { case MM_IDLE: return "IDLE"; case MM_HOMING: return "HOME";
@@ -92,7 +99,7 @@ static inline float profile_pos(const profile_t *p, float t) {
 // ----------------------------- Controller ---------------------------------
 typedef struct {
   float   vmax, amax, homeSpeed;     // steps/s, steps/s^2, steps/s
-  int32_t homeMaxSteps;              // homing gives up after this many steps per end
+  int32_t homeMaxSteps;              // homing gives up after this many steps per end; <= 0 = never
   int32_t skipThreshold;             // allowed commanded-vs-encoder error
   bool    homeReturn;                // after homing, drive X / Y back to coordinate 0
 } motion_config_t;

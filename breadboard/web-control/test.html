@@ -62,14 +62,15 @@ check(near(G.markerFraction(0, 9), 0.5 / 9) && near(G.markerFraction(4096, 9), 8
 check(G.markerFraction(-1, 9) === null, "no z marker when not homed");
 
 // --- grid cells ------------------------------------------------------------
-check(eq(G.GRID_SIZES, [8, 16, 32]) && G.FINE === 32 && G.PATH_MAX === 64, "sizes / limits");
+check(eq(G.GRID_SIZES, [3, 8, 16, 32]) && G.FINE === 32 && G.PATH_MAX === 64, "sizes / limits");
+check(eq([0, 1, 2].map((i) => G.cellCenter(3, i)), [683, 2048, 3413]), "3 x 3 centres rounded");
 for (const n of G.GRID_SIZES) {
   const w = 4096 / n;
   for (let i = 0; i < n; i++) {
     const c = G.cellCenter(n, i);
-    check(Number.isInteger(c) && c === i * w + w / 2, `n=${n}: centre of ${i} = ${c}`);
+    check(Number.isInteger(c) && Math.abs(c - (i * w + w / 2)) <= 0.5, `n=${n}: centre of ${i} = ${c}`);
     check(G.cellOf(n, c) === i, `n=${n}: centre ${c} is in cell ${i}`);
-    check(G.cellOf(n, i * w) === i && G.cellOf(n, (i + 1) * w - 1) === i, `n=${n}: cell ${i} edges`);
+    check(G.cellOf(n, Math.ceil(i * w)) === i && G.cellOf(n, Math.ceil((i + 1) * w) - 1) === i, `n=${n}: cell ${i} edges`);
   }
   check(G.cellOf(n, 0) === 0 && G.cellOf(n, 4096) === n - 1 && G.cellOf(n, -1) === -1, `n=${n}: ends / unhomed`);
 }
@@ -102,6 +103,45 @@ check(G.cellSteps(16, 2900) === 2900 / 16 && G.cellSteps(8, 0) === null, "cell s
   const t = new G.Obstacles(); t.set(32, 31, 31, true);
   const tab = t.table(8);
   check(tab.length === 64 && tab[63] === 1 && tab.reduce((a, v) => a + v, 0) === 1, "table(8)");
+}
+// --- 3 x 3: 32 doesn't divide by 3, each fine cell belongs to exactly one big cell
+{
+  const owner = (x) => Math.floor((x + 0.5) * 3 / 32);
+  let total = 0;
+  for (let j = 0; j < 3; j++) for (let i = 0; i < 3; i++) {
+    const o = new G.Obstacles(); o.set(3, i, j, true);
+    total += o.count();
+    let ok = true;
+    for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++)
+      if (!!o.isBlocked(32, x, y) !== (owner(x) === i && owner(y) === j)) ok = false;
+    check(ok, `3x3 cell ${i},${j} covers exactly its fine cells`);
+    for (let jj = 0; jj < 3; jj++) for (let ii = 0; ii < 3; ii++)
+      check(o.isBlocked(3, ii, jj) === (ii === i && jj === j), `3x3 cell ${i},${j} blocks only itself (saw ${ii},${jj})`);
+    o.set(3, i, j, false);
+    check(o.count() === 0, `3x3 cell ${i},${j} unblocks fully`);
+  }
+  check(total === 1024, "3x3 cells cover all 32 x 32 fine cells once (" + total + ")");
+  const o = new G.Obstacles();
+  o.set(32, 10, 0, true);                          // centre 10.5/32 = 0.328 -> 3x3 column 0
+  check(o.isBlocked(3, 0, 0) && !o.isBlocked(3, 1, 0), "edge fine cell 10 -> 3x3 column 0");
+  o.clear(); o.set(32, 11, 0, true);
+  check(!o.isBlocked(3, 0, 0) && o.isBlocked(3, 1, 0), "fine cell 11 -> 3x3 column 1");
+  o.clear(); o.set(32, 21, 31, true);
+  check(o.isBlocked(3, 2, 2) && !o.isBlocked(3, 1, 2), "fine cell 21 -> 3x3 column 2");
+  o.clear(); o.set(8, 2, 2, true);                 // 8x8 cell = fine 8..11: spans 3x3 cells 0 and 1
+  check(o.isBlocked(3, 0, 0) && o.isBlocked(3, 1, 1) && !o.isBlocked(3, 2, 2), "8x8 block shows in both 3x3 cells it touches");
+  // Plan on 3x3: middle blocked, go corner to corner the long way round
+  o.clear(); o.set(3, 1, 1, true);
+  const p = G.planPath(3, o, [G.cellCenter(3, 0), G.cellCenter(3, 0)], [2, 2]);
+  check(p.ok && p.length === 4 && p.turns === 1, "3x3 plan around the middle (len " + p.length + " turns " + p.turns + ")");
+  check(p.ok && eq(p.waypoints[p.waypoints.length - 1], [3413, 3413]), "3x3 plan ends at the corner centre");
+  check(p.ok && p.cells.every(([i, j]) => !(i === 1 && j === 1)), "3x3 plan avoids the middle");
+  check(p.ok && p.waypoints.every(([x, y]) => Number.isInteger(x) && Number.isInteger(y)), "3x3 waypoints are whole numbers");
+  // From a position that isn't a centre: line-up move first, all moves along X or Y
+  const q = G.planPath(3, new G.Obstacles(), [100, 3000], [2, 0]);
+  let at = [100, 3000], axisOnly = q.ok;
+  for (const w of q.ok ? q.waypoints : []) { if (w[0] !== at[0] && w[1] !== at[1]) axisOnly = false; at = w; }
+  check(axisOnly && eq(at, [3413, 683]), "3x3 off-centre start: moves along X or Y only, ends at " + at);
 }
 
 // --- A* (Manhattan) against a brute-force reference --------------------------
@@ -244,7 +284,7 @@ function checkPlan(n, o, pos, goal, plan, name) {
 
   // Random plans at every size
   for (let trial = 0; trial < 120; trial++) {
-    const n = G.GRID_SIZES[trial % 3], oo = new G.Obstacles();
+    const n = G.GRID_SIZES[trial % G.GRID_SIZES.length], oo = new G.Obstacles();
     for (let k = 0; k < n * n * 0.25; k++) oo.set(n, randInt(n), randInt(n), true);
     const pos = [randInt(4097), randInt(4097)], goal = [randInt(n), randInt(n)];
     const pl = G.planPath(n, oo, pos, goal);

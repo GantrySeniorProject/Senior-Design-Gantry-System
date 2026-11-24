@@ -82,6 +82,12 @@ int main(void) {
   CHECK(home_check(HOME_SEEK_MIN, false, false, 0, 101, 100) == HOME_ERR_TIMEOUT, "timeout seeking MIN");
   CHECK(home_check(HOME_SEEK_MAX, false, false, 101, 101, 100) == HOME_ERR_TIMEOUT, "timeout seeking MAX");
   CHECK(home_check(HOME_SEEK_MIN, true,  false, 0, 999, 100) == HOME_FOUND_MIN, "switch wins over timeout");
+  // maxSteps <= 0: no timeout, however far it goes
+  CHECK(home_check(HOME_SEEK_MIN, false, false, 0, 2000000000, 0) == HOME_CONTINUE, "no limit seeking MIN");
+  CHECK(home_check(HOME_SEEK_MAX, false, false, 900000, 900000, 0) == HOME_CONTINUE, "no limit seeking MAX");
+  CHECK(home_check(HOME_SEEK_MIN, false, false, 0, 101, -1) == HOME_CONTINUE, "negative limit = no limit");
+  CHECK(home_check(HOME_SEEK_MAX, false, true, 50000, 50000, 0) == HOME_FOUND_MAX, "no limit still finds MAX");
+  CHECK(home_check(HOME_SEEK_MAX, false, true, 30, 30, 0) == HOME_ERR_SHORT, "no limit still catches a short rail");
 
   // 2b) keep_home_check: only an E-stop on a homed axis whose encoder hasn't moved
   CHECK(keep_home_check(true,  true,  500, 500, 500, 4) == KEEP_OK,        "E-stop, homed, still -> keep");
@@ -111,6 +117,27 @@ int main(void) {
       CHECK(r.span == runs[i].span, "run %zu: span %ld, want %ld", i, (long)r.span, (long)runs[i].span);
       CHECK(r.pos == runs[i].maxAt, "run %zu: stopped at %ld, MAX switch at %ld", i, (long)r.pos, (long)runs[i].maxAt);
     }
+  }
+  // 3b) No limit (maxSteps 0): runs that used to time out now home, as long as the
+  // switches are there (200 s of ticks = 60000 steps at 300/s).
+  struct { int32_t start, minAt, maxAt, span; } farRuns[] = {
+    { 30000,     0,  2900,  2900 },   // MIN 30000 steps away (> 3*4096)
+    {  1000,     0, 20000, 20000 },   // MAX 19000 steps past start
+    { 15000, -1000, 13000, 14000 },
+  };
+  for (size_t i = 0; i < sizeof farRuns / sizeof farRuns[0]; i++) {
+    home_run_t r = simulate_homing(farRuns[i].start, farRuns[i].minAt, farRuns[i].maxAt, 0);
+    CHECK(r.result == HOME_FOUND_MAX, "far run %zu: result %d, want FOUND_MAX", i, r.result);
+    CHECK(r.span == farRuns[i].span, "far run %zu: span %ld, want %ld", i, (long)r.span, (long)farRuns[i].span);
+    CHECK(r.pos == farRuns[i].maxAt, "far run %zu: stopped at %ld", i, (long)r.pos);
+  }
+  {  // no switch at all: never faults, just keeps going (until x / E-stop)
+    home_run_t r = simulate_homing(1000, -999999, 999999, 0);
+    CHECK(r.result == HOME_CONTINUE, "no switch, no limit: still homing (result %d)", r.result);
+  }
+  {  // short rail is still caught with no limit
+    home_run_t r = simulate_homing(500, 490, 520, 0);
+    CHECK(r.result == HOME_ERR_SHORT, "no limit, short rail: result %d", r.result);
   }
 
   printf("%s (%d failures)\n", failures ? "FAILED" : "ALL TESTS PASSED", failures);

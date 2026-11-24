@@ -17,9 +17,11 @@ static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; if (failures <= 30) { \
   printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); printf("\n"); } } } while (0)
 
-static const motion_config_t CFG = { .vmax = 600.0f, .amax = 1200.0f, .homeSpeed = 300.0f,
-                                     .homeMaxSteps = 3 * 4096, .skipThreshold = 4,
-                                     .homeReturn = true };
+// The suite runs twice: with the old slow settings, then with main.c's current
+// ones (VMAX 700, AMAX 1800, HOME_SPEED 600).
+static motion_config_t CFG = { .vmax = 600.0f, .amax = 1200.0f, .homeSpeed = 300.0f,
+                               .homeMaxSteps = 3 * 4096, .skipThreshold = 4,
+                               .homeReturn = true };
 
 // ----------------------------- Simulated machine --------------------------
 typedef struct {
@@ -253,11 +255,17 @@ static void test_moves(void) {
   for (int a = 0; a < 3; a++) CHECK(m.ax[a].enc == m.ax[a].pos, "axis %d encoder agrees", a);
   CHECK(!s.stepWhileFault, "no steps while faulted");
 
-  // A long move takes the S-curve time: 2900 steps at 600 steps/s + ramps ~ 5.6 s
+  // A move takes the S-curve time for its distance at these vmax / amax
   int32_t to0[3] = { 0, -1, -1 };
+  int32_t dist = s.abs[AXIS_X];
+  profile_t pp; profile_plan(&pp, (float)dist, CFG.vmax, CFG.amax);
   motion_start_move(&m, to0);
   int ticks = run_while(&s, MM_MOVE, 100000);
-  CHECK(ticks > 2000 && ticks < 4000, "X 1450 steps took %d ms", ticks);
+  CHECK(dist == 1450 && abs(ticks - (int)(pp.total * 1000.0f)) <= 3,
+        "X %ld steps took %d ms, profile says %.0f", (long)dist, ticks, pp.total * 1000.0f);
+  profile_t slow; profile_plan(&slow, (float)dist, 600.0f, 1200.0f);   // the original settings
+  if (CFG.vmax > 600.0f)
+    CHECK(ticks < (int)(slow.total * 1000.0f) - 200, "faster settings make it faster (%d ms vs %.0f ms)", ticks, slow.total * 1000.0f);
 
   // Stop mid-move: stays put and is idle
   int32_t toMax[3] = { 4096, 4096, -1 };
@@ -526,17 +534,71 @@ static void test_homing_errors(void) {
   CHECK(m.mode == MM_IDLE && m.ax[AXIS_Y].span == RAIL_MAX[AXIS_Y], "homing from the MIN switches");
 }
 
+static void test_phase_reverse(void) {
+  for (uint8_t i = 0; i < 8; i++) {
+    CHECK(stepper_phase_next(i, 1, false) == ((i + 1) & 7), "phase %d +1", i);
+    CHECK(stepper_phase_next(i, -1, false) == ((i + 7) & 7), "phase %d -1", i);
+    CHECK(stepper_phase_next(i, 1, true) == stepper_phase_next(i, -1, false), "phase %d reversed +1", i);
+    CHECK(stepper_phase_next(i, -1, true) == stepper_phase_next(i, 1, false), "phase %d reversed -1", i);
+    CHECK(stepper_phase_next(stepper_phase_next(i, 1, true), -1, true) == i, "phase %d reversed round trip", i);
+  }
+}
+
+// homeMaxSteps = 0 (what main.c uses): homing never times out
+static void test_homing_no_timeout(void) {
+  motion_config_t cfg = CFG; cfg.homeMaxSteps = 0;
+  motion_t m; sim_t s;
+  // Z MIN 20000 steps away (past the old 3*4096 limit): homes instead of faulting
+  const int32_t start[3] = { 15000, 700, 20000 };
+  const int32_t farMin[3] = { 0, 0, 0 }, maxAt[3] = { 2900, 2100, 1500 };
+  sim_init(&s, &m, start, farMin, maxAt);
+  motion_init(&m, &cfg, sim_step, &s);
+  home_all(&s, &m);
+  CHECK(m.fault == MF_NONE && m.mode == MM_IDLE, "no timeout: fault %d mode %d", m.fault, m.mode);
+  for (int a = 0; a < MOTION_AXES; a++)
+    CHECK(m.ax[a].homed && m.ax[a].span == maxAt[a], "axis %d homed span %ld", a, (long)m.ax[a].span);
+  CHECK(s.abs[AXIS_X] == 0 && s.abs[AXIS_Y] == 0 && s.abs[AXIS_Z] == maxAt[AXIS_Z], "ends at 0,0, Z raised");
+
+  // No switch ever: still homing after 200 s, no fault; x stops it, E-stop faults it
+  const int32_t never[3] = { -9999999, -9999999, -9999999 };
+  sim_init(&s, &m, start, never, maxAt);
+  motion_init(&m, &cfg, sim_step, &s);
+  int x = AXIS_X;
+  motion_start_homing(&m, &x, 1);
+  run_while(&s, MM_HOMING, 200000);
+  CHECK(m.mode == MM_HOMING && m.fault == MF_NONE, "no switch: still homing (mode %d fault %d)", m.mode, m.fault);
+  motion_stop(&m);
+  sim_tick(&s);
+  CHECK(m.mode != MM_HOMING && !m.ax[AXIS_X].homed, "x stops endless homing (mode %d)", m.mode);
+
+  sim_init(&s, &m, start, never, maxAt);
+  motion_init(&m, &cfg, sim_step, &s);
+  motion_start_homing(&m, &x, 1);
+  run_while(&s, MM_HOMING, 5000);
+  s.estop = true;
+  sim_tick(&s);
+  CHECK(m.mode == MM_FAULT && m.fault == MF_ESTOP, "E-stop stops endless homing (fault %d)", m.fault);
+  CHECK(!s.stepWhileFault, "no steps after E-stop");
+}
+
 int main(void) {
-  test_profile();
-  test_names();
-  test_homing_all();
-  test_home_one_axis();
-  test_moves();
-  test_limit_and_skip();
-  test_estop_keep();
-  test_homing_errors();
-  test_xy_only();
-  test_paths();
+  for (int pass = 0; pass < 2; pass++) {
+    if (pass == 1) { CFG.vmax = 700.0f; CFG.amax = 1800.0f; CFG.homeSpeed = 600.0f; }
+    int before = failures;
+    test_profile();
+    test_names();
+    test_homing_all();
+    test_home_one_axis();
+    test_moves();
+    test_limit_and_skip();
+    test_estop_keep();
+    test_homing_errors();
+    test_homing_no_timeout();
+    test_phase_reverse();
+    test_xy_only();
+    test_paths();
+    printf("vmax %.0f amax %.0f home %.0f: %d failures\n", CFG.vmax, CFG.amax, CFG.homeSpeed, failures - before);
+  }
   printf("%s (%d failures)\n", failures ? "FAILED" : "ALL TESTS PASSED", failures);
   return failures ? 1 : 0;
 }

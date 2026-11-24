@@ -11,7 +11,7 @@
   // X/Y grid: n x n cells covering the whole homed rail, so changing n only changes
   // how big a cell is (span / n steps); no re-homing. Each size splits the previous
   // one's cells in 4, so blocked cells are stored once, at the finest size.
-  const GRID_SIZES = [8, 16, 32];
+  const GRID_SIZES = [3, 8, 16, 32];
   const FINE = 32;
   const PATH_MAX = 64;             // waypoints per path, matches MOTION_PATH_MAX in main/motion.h
 
@@ -82,8 +82,9 @@
 
   // ----------------------------- X/Y grid cells -----------------------------
   // Cell i of n covers coordinates [i, i+1) * 4096/n; its centre is where the
-  // carriage stops. Centres are whole numbers for n = 8, 16, 32.
-  const cellCenter = (n, i) => (2 * i + 1) * COORD_MAX / (2 * n);
+  // carriage stops. Centres are exact for n = 8, 16, 32 and rounded to a whole
+  // coordinate otherwise (n = 3: 683, 2048, 3413).
+  const cellCenter = (n, i) => Math.round((2 * i + 1) * COORD_MAX / (2 * n));
   function cellOf(n, coord) {
     if (!(coord >= 0)) return -1;
     return Math.max(0, Math.min(n - 1, Math.floor(coord * n / COORD_MAX)));
@@ -94,12 +95,15 @@
 
   // Blocked cells (something sits there; the payload must not go through).
   // Stored at 32 x 32; a bigger cell is blocked if any 32 x 32 cell inside it is.
+  // Each 32 x 32 cell belongs to the bigger cell that holds its centre, so sizes
+  // that don't divide 32 (3 x 3: 11 + 10 + 11 fine cells) still split it cleanly.
+  const fineRange = (n, i) => [Math.ceil(i * FINE / n - 0.5), Math.ceil((i + 1) * FINE / n - 0.5)];
   class Obstacles {
     constructor() { this.fine = new Uint8Array(FINE * FINE); }
     _block(n, i, j, fn) {
-      const k = FINE / n;
-      for (let y = j * k; y < (j + 1) * k; y++)
-        for (let x = i * k; x < (i + 1) * k; x++) fn(y * FINE + x);
+      const [x0, x1] = fineRange(n, i), [y0, y1] = fineRange(n, j);
+      for (let y = y0; y < y1; y++)
+        for (let x = x0; x < x1; x++) fn(y * FINE + x);
     }
     isBlocked(n, i, j) {
       if (i < 0 || j < 0 || i >= n || j >= n) return true;   // off the grid counts as a wall

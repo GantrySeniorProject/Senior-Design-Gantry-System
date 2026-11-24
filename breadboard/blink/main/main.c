@@ -78,10 +78,18 @@ static const gpio_num_t COIL_PINS[MOTION_AXES][4] = {
 
 // ----------------------------- Tuning -------------------------------------
 // Kit stepper (28BYJ-48), half-step mode: about 4096 half-steps per output turn.
-#define VMAX              600.0f   // half-steps per second (per motor)
-#define AMAX              1200.0f  // peak acceleration, half-steps/s^2
-#define HOME_SPEED        300.0f
-#define HOME_MAX_STEPS    (3 * 4096) // homing gives up after this many steps per end
+// Speed limit: the 1 kHz controller makes at most 1 step per tick, so VMAX and
+// HOME_SPEED must stay below 1000. If a loaded motor buzzes or stalls instead of
+// turning, lower VMAX (800, then 700) or AMAX.
+#define VMAX              700.0f   // half-steps per second (per motor); 900 stuttered with thread attached, 800 stalled Y
+#define AMAX              1800.0f  // peak acceleration, half-steps/s^2 (2400 stuttered under load)
+#define HOME_SPEED        600.0f
+#define HOME_MAX_STEPS    0        // homing gives up after this many steps per end; 0 = never
+                                   // (it runs until the limit is pressed; stop it with x or the E-stop)
+
+// Flip an axis's turning direction (X, Y, Z) if MIN drives the wrong way.
+// X and Y are reversed: before this, MIN went right (X) and up (Y).
+static const bool MOTOR_REVERSE[3] = { true, true, false };
 #define SKIP_THRESHOLD    4        // allowed commanded-vs-encoder error
 #define VIRT_PRESS_MS     150      // how long a p.. simulated limit press lasts
 #define STATUS_PERIOD_MS  50       // "@S" status line rate for the web page (20 Hz)
@@ -116,7 +124,7 @@ static void coils_off(int a) {
 
 static void hw_step(void *ctx, int a, int dir) {         // called by motion.h, under motionMux
   (void)ctx;
-  phaseIdx[a] = (uint8_t)((phaseIdx[a] + (dir > 0 ? 1 : 7)) & 7);
+  phaseIdx[a] = stepper_phase_next(phaseIdx[a], dir, MOTOR_REVERSE[a]);
   coils_write(a, phaseIdx[a]);
   lastStepMs[a] = millis32();
 }
